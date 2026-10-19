@@ -1,30 +1,30 @@
 ---
 name: model-router
 description: >
-  Route each task to the Claude Code subagent pinned to the fitting model.
-  Use before delegating work, and whenever the user mentions routing, which
-  model, Haiku, Sonnet, Opus, check log, lên plan, fix, review, make PR, or
-  bump image tag.
+  Split a request into stages and delegate each stage to the Claude Code
+  subagent pinned to the fitting model. Use before delegating work, and
+  whenever the user mentions routing, which model, Haiku, Sonnet, Opus,
+  check log, lên plan, fix, review, make PR, or bump image tag.
 ---
 
 # Model router
 
-Delegate the task to exactly one of these subagents. The subagent's `model` frontmatter pins the model. Do the work in the subagent, not on the main thread.
+The main session stays on Sonnet and coordinates. It does not do the stage work itself. A hook hint is context, not a model switch: you still have to call the Agent tool.
 
-| Request | Subagent | Model |
-| --- | --- | --- |
-| Lên plan code, viết implementation plan, thiết kế cách làm | `tier-opus` | opus |
-| Fix, review, sửa bug, implement | `tier-sonnet` | sonnet |
-| Make PR, bump image tag, and the task is not also a fix | `tier-haiku` | haiku |
-| Check log of a service to see if there are bugs, and the task is not also a fix | `tier-haiku` | haiku |
-| Anything else | `tier-sonnet` | sonnet |
+Route each stage separately:
 
-First match wins. A request to write a plan stays on `tier-opus` even if the plan is about a bug. A request that both fixes and opens a PR stays on `tier-sonnet`.
+- plan code or plan a feature -> `tier-opus` (`model: opus`, the latest Opus alias)
+- check logs of a service or an agent -> `tier-haiku` (`model: haiku`, the latest Haiku alias)
+- implement or improve -> a fresh `tier-sonnet` (`model: sonnet`, the latest Sonnet alias)
+- review code -> another fresh `tier-sonnet`
+- PR and image-tag bump -> `tier-haiku`
 
-Examples:
-- "check log của service xxx để xem có bugs ko" → `tier-haiku`
-- "Fix và review" → `tier-sonnet`
-- "Lên plan code" → `tier-opus`
-- "Make PR & bump image tag" → `tier-haiku`
+Those `model` values are aliases. When Sonnet 5.8 or a later Haiku or Opus ships, leave the alias. Do not write a versioned id into the agent file.
 
-An explicit @-mention (`@tier-haiku`, `@tier-sonnet`, `@tier-opus`) overrides this table.
+Fix and review share the `tier-sonnet` definition. Spawn it twice so the reviewer does not see the implementer's context.
+
+A clear one-stage request goes to that one subagent. "Lên plan để fix bug" is a plan whose subject is the bug, so only `tier-opus` runs. "Không cần lên plan, fix bug này" drops the negated plan and only implements. "Review log ... xem có lỗi không" is log triage on `tier-haiku`, not a code review.
+
+A sentence that asks for several stages, such as "lên plan rồi implement và make PR", is not one Opus task. Read it, skip stages the user negated, delegate each remaining stage, and finish all of them. `tier-opus` only writes the plan.
+
+An explicit @-mention overrides this.

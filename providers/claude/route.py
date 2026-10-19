@@ -1,89 +1,96 @@
 #!/usr/bin/env python3
-"""Deterministic router for the Claude Code subagents in this repo.
+"""Route a Claude Code prompt to subagents.
 
-Rules, first match wins:
-  plan            -> tier-opus
-  fix or review   -> tier-sonnet
-  make PR / bump  -> tier-haiku
-  check logs      -> tier-haiku
-  anything else   -> tier-sonnet
+Clear, single-intent requests get one suggested subagent. A negated intent is
+dropped, so "không cần lên plan, fix bug này" stays a fix. A request that
+asks for more than one model is "split": the hook does not assign it to a
+single agent. The main session, on Sonnet, reads the sentence and delegates
+each stage.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shlex
 import sys
 import unicodedata
 from pathlib import Path
 
-TIERS = ("haiku", "sonnet", "opus")
 AGENTS = {
     "haiku": "tier-haiku",
     "sonnet": "tier-sonnet",
     "opus": "tier-opus",
 }
 
-_PLAN_PHRASES = (
-    "len plan",
-    "lap plan",
-    "viet plan",
-    "len ke hoach",
-    "ke hoach code",
-    "plan code",
-    "code plan",
-    "implementation plan",
-    "coding plan",
-    "write a plan",
-    "make a plan",
-    "create a plan",
-    "draft a plan",
-    "thiet ke kien truc",
-    "system design",
-    "architecture plan",
-)
+# Stable order used when reporting which signals fired.
+_SIGNAL_ORDER = ("plan", "log", "implement", "review", "pr")
+
 _PLAN_RES = (
-    re.compile(r"\b(write|make|create|draft)\s+(a\s+)?(code\s+|implementation\s+)?plan\b"),
-    re.compile(r"\bplan\s+(the\s+)?(code|implementation|feature|refactor|migration)\b"),
+    re.compile(r"\blen plan\b"),
+    re.compile(r"\blap plan\b"),
+    re.compile(r"\bviet plan\b"),
+    re.compile(r"\blen ke hoach\b"),
+    re.compile(r"\bke hoach code\b"),
+    re.compile(r"\bplan code\b"),
+    re.compile(r"\bcode plan\b"),
+    re.compile(r"\bimplementation plan\b"),
+    re.compile(r"\bcoding plan\b"),
+    re.compile(r"\b(?:write|make|create|draft)\s+(?:a\s+)?(?:code\s+|implementation\s+)?plan\b"),
+    re.compile(r"\bplan\s+(?:the\s+)?(?:code|implementation|feature|refactor|migration)\b"),
+    re.compile(r"\bplan\s+(?:cho|for)\s+(?:tinh nang|feature|a feature|the feature)\b"),
+    re.compile(r"\bthiet ke kien truc\b"),
+    re.compile(r"\bsystem design\b"),
+    re.compile(r"\barchitecture plan\b"),
 )
-
-_FIX_RES = (
-    re.compile(r"\b(fix|fixes|fixing|review|reviews|reviewing|implement|implements|implementing)\b"),
-    re.compile(r"\b(sua bug|sua loi|sua code|code review|fix bug)\b"),
+_IMPLEMENT_RE = re.compile(
+    r"\b(?:fix|fixes|fixing|implement|implements|implementing|improve|improves|improving|improvement|"
+    r"cai thien|sua bug|sua loi|sua code|fix bug)\b"
 )
-
-_PR_PHRASES = (
-    "make pr",
-    "tao pr",
-    "mo pr",
-    "open pr",
-    "open a pr",
-    "create pr",
-    "create a pr",
-    "pull request",
-    "gh pr",
-    "bump image",
-    "image tag",
-    "bump tag",
-    "cap nhat image tag",
-    "bump the image",
+_REVIEW_RE = re.compile(r"\b(?:reviews?|reviewing|code review)\b")
+_REVIEW_LOG_RE = re.compile(r"\breviews?\s+(?:the\s+)?(?:service\s+)?logs?\b")
+_PR_RES = (
+    re.compile(r"\b(?:make|tao|mo|open|create)\s+(?:a\s+)?pr\b"),
+    re.compile(r"\b(?:make|tao|mo|open|create)\s+(?:a\s+)?pull request\b"),
+    re.compile(r"\bgh pr\b"),
+    re.compile(r"\bbump(?:\s+the)?\s+image\b"),
+    re.compile(r"\bimage tag\b"),
+    re.compile(r"\bbump tag\b"),
+    re.compile(r"\bcap nhat image tag\b"),
 )
-
-_LOG_PHRASES = (
-    "check log",
-    "kiem tra log",
-    "xem log",
-    "doc log",
-    "read log",
-    "read the log",
-    "service log",
-    "pod log",
-    "kubectl log",
-    "debug log",
-    "tail log",
+_LOG_RES = (
+    re.compile(r"\bcheck logs?\b"),
+    re.compile(r"\bkiem tra logs?\b"),
+    re.compile(r"\bxem logs?\b"),
+    re.compile(r"\bdoc logs?\b"),
+    re.compile(r"\bread(?:\s+the)?\s+logs?\b"),
+    re.compile(r"\breviews?\s+(?:the\s+)?(?:service\s+)?logs?\b"),
+    re.compile(r"\bservice logs?\b"),
+    re.compile(r"\bpod logs?\b"),
+    re.compile(r"\bkubectl logs?\b"),
+    re.compile(r"\bdebug logs?\b"),
+    re.compile(r"\btail logs?\b"),
+    re.compile(r"\blogs?\s+cua\s+agent\b"),
+    re.compile(r"\bagent logs?\b"),
 )
 _LOG_WORD = re.compile(r"\blogs?\b")
-_LOG_SIGNAL = re.compile(r"\b(bug|bugs|loi|error|errors|exception|exceptions)\b")
+_LOG_SIGNAL = re.compile(r"\b(?:bug|bugs|loi|error|errors|exception|exceptions)\b")
+_SEQUENCE = re.compile(r"\b(?:roi|sau do|then|and then|and|va)\b")
+_PURPOSE = re.compile(r"\b(?:de|for|to)\b")
+# Explicit cancellation in front of an intent. A trailing "không" in
+# "có lỗi không" is a question particle and is not listed here.
+_NEGATION_BEFORE = re.compile(
+    r"(?:\bkhong can\b|\bkhong muon\b|\bkhong phai\b|\bchua can\b|"
+    r"\bdung nen\b|\bdung\b|\bdon'?t\b|\bdo not\b|\bno need(?: to)?\b|"
+    r"\bskip\b|\bwithout\b|\bbo qua\b)\W*$"
+)
+
+_STAGE_TABLE = """\
+- planning -> tier-opus
+- log triage -> tier-haiku
+- implementation -> a fresh tier-sonnet
+- independent review -> another fresh tier-sonnet, separate from the implementer
+- PR and image-tag bump -> tier-haiku"""
 
 
 def fold(text: str) -> str:
@@ -93,56 +100,130 @@ def fold(text: str) -> str:
     return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
 
 
-def _has_phrase(text: str, phrases: tuple[str, ...]) -> bool:
-    return any(phrase in text for phrase in phrases)
+def _spans(pattern: re.Pattern[str], text: str) -> list[tuple[int, int]]:
+    return [(match.start(), match.end()) for match in pattern.finditer(text)]
 
 
-def matches_plan(text: str) -> bool:
-    return _has_phrase(text, _PLAN_PHRASES) or any(pattern.search(text) for pattern in _PLAN_RES)
+def _negated(text: str, start: int) -> bool:
+    window = text[max(0, start - 48) : start]
+    return _NEGATION_BEFORE.search(window) is not None
 
 
-def matches_fix(text: str) -> bool:
-    return any(pattern.search(text) for pattern in _FIX_RES)
+def _live(text: str, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    return [span for span in spans if not _negated(text, span[0])]
 
 
-def matches_pr(text: str) -> bool:
-    return _has_phrase(text, _PR_PHRASES)
+def _signals(text: str) -> dict[str, list[tuple[int, int]]]:
+    review_log = _spans(_REVIEW_LOG_RE, text)
+    review = []
+    for start, end in _spans(_REVIEW_RE, text):
+        if any(not (end <= log_start or start >= log_end) for log_start, log_end in review_log):
+            continue
+        review.append((start, end))
+
+    log = []
+    for pattern in _LOG_RES:
+        log.extend(_spans(pattern, text))
+    if not log and _LOG_WORD.search(text) and _LOG_SIGNAL.search(text):
+        word = _LOG_WORD.search(text)
+        if word:
+            log.append((word.start(), word.end()))
+
+    found = {
+        "plan": [span for pattern in _PLAN_RES for span in _spans(pattern, text)],
+        "log": log,
+        "implement": _spans(_IMPLEMENT_RE, text),
+        "review": review,
+        "pr": [span for pattern in _PR_RES for span in _spans(pattern, text)],
+    }
+    return {name: _live(text, spans) for name, spans in found.items() if _live(text, spans)}
 
 
-def matches_log(text: str) -> bool:
-    if _has_phrase(text, _LOG_PHRASES):
-        return True
-    return _LOG_WORD.search(text) is not None and _LOG_SIGNAL.search(text) is not None
+def _plan_subject_only(text: str, signals: dict[str, list[tuple[int, int]]]) -> bool:
+    """'lên plan để fix bug' asks for a plan whose subject is the fix."""
+    if "plan" not in signals or len(signals) < 2 or _SEQUENCE.search(text):
+        return False
+    plan_end = min(end for _, end in signals["plan"])
+    for name, spans in signals.items():
+        if name == "plan":
+            continue
+        for start, _end in spans:
+            if start < plan_end or not _PURPOSE.search(text[plan_end:start]):
+                return False
+    return True
+
+
+def _decision(rule: str, tier: str | None, signals: list[str], stages: list[dict] | None) -> dict:
+    return {
+        "tier": tier,
+        "agent": AGENTS[tier] if tier else None,
+        "model": tier,
+        "rule": rule,
+        "signals": signals,
+        "stages": stages,
+    }
 
 
 def classify(task: str) -> dict:
     text = fold(task)
-    if matches_plan(text):
-        tier, rule = "opus", "plan"
-    elif matches_fix(text):
-        tier, rule = "sonnet", "fix-or-review"
-    elif matches_pr(text):
-        tier, rule = "haiku", "pr-or-bump"
-    elif matches_log(text):
-        tier, rule = "haiku", "log-check"
-    else:
-        tier, rule = "sonnet", "default"
-    return {
-        "tier": tier,
-        "agent": AGENTS[tier],
-        "model": tier,
-        "rule": rule,
-    }
+    signals = _signals(text)
+    if _plan_subject_only(text, signals):
+        signals = {"plan": signals["plan"]}
+    names = [name for name in _SIGNAL_ORDER if name in signals]
+    agents = []
+    for name in names:
+        tier = {"plan": "opus", "log": "haiku", "implement": "sonnet", "review": "sonnet", "pr": "haiku"}[name]
+        if tier not in agents:
+            agents.append(tier)
+
+    if len(agents) > 1:
+        return _decision("split", None, names, None)
+    if names == ["implement", "review"]:
+        return _decision(
+            "fix-and-review",
+            "sonnet",
+            names,
+            [
+                {"stage": "implement", "agent": "tier-sonnet"},
+                {"stage": "review", "agent": "tier-sonnet"},
+            ],
+        )
+    if names == ["plan"]:
+        return _decision("plan", "opus", names, [{"stage": "plan", "agent": "tier-opus"}])
+    if names == ["log"]:
+        return _decision("log-check", "haiku", names, [{"stage": "log", "agent": "tier-haiku"}])
+    if names == ["pr"]:
+        return _decision("pr-or-bump", "haiku", names, [{"stage": "pr", "agent": "tier-haiku"}])
+    if names == ["implement"]:
+        return _decision("implement", "sonnet", names, [{"stage": "implement", "agent": "tier-sonnet"}])
+    if names == ["review"]:
+        return _decision("review", "sonnet", names, [{"stage": "review", "agent": "tier-sonnet"}])
+    return _decision("default", "sonnet", names, [{"stage": "default", "agent": "tier-sonnet"}])
 
 
 def hook_payload(task: str) -> dict:
     decision = classify(task)
-    context = (
-        f"Orchestrator: delegate this request to the `{decision['agent']}` subagent "
-        f"(model: {decision['model']}). Do the work in that subagent, not on the main thread. "
-        f"Reason: {decision['rule']}. Pass the user's full request as the task. "
-        f"An explicit @-mention of another subagent overrides this."
-    )
+    if decision["rule"] == "split":
+        noticed = ", ".join(decision["signals"]) or "none"
+        context = (
+            "Orchestrator hint only. This sentence looks multi-step, so do not send it to one subagent. "
+            f"Keyword signals noticed: {noticed}. Read the user's sentence yourself and skip anything they negated. "
+            "You are the coordinator on the main Sonnet session. Delegate each stage that they actually asked for:\n"
+            f"{_STAGE_TABLE}\n"
+            "Finish every requested stage. An explicit @-mention overrides this hint."
+        )
+    elif decision["rule"] == "fix-and-review":
+        context = (
+            "Orchestrator hint only. Spawn `tier-sonnet` twice. "
+            "The first spawn implements the fix. The second spawn is a fresh reviewer with its own context and only reviews. "
+            "Do not let the implementer review its own change. An explicit @-mention overrides this hint."
+        )
+    else:
+        context = (
+            f"Orchestrator hint only. This looks like one {decision['rule']} stage. "
+            f"Delegate it to `{decision['agent']}` (model: {decision['model']}) and do the work in that subagent. "
+            "An explicit @-mention overrides this hint."
+        )
     return {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
@@ -155,9 +236,10 @@ def install_hook(settings_path: Path, script_path: Path) -> None:
     settings: dict = {}
     if settings_path.exists():
         settings = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
+    settings["model"] = "sonnet"
     hooks = settings.setdefault("hooks", {})
     groups = hooks.setdefault("UserPromptSubmit", [])
-    entry = {"type": "command", "command": str(script_path), "timeout": 10}
+    entry = {"type": "command", "command": shlex.quote(str(script_path)), "timeout": 10}
     marker = script_path.name
     replaced = False
     for group in groups:
@@ -215,9 +297,10 @@ def main(argv: list[str] | None = None) -> int:
     if args[0] in ("-h", "--help"):
         print(
             "usage:\n"
-            "  route.py --explain PROMPT\n"
-            "  route.py                  # Claude Code UserPromptSubmit hook (JSON on stdin)\n"
-            "  route.py --install-hook SETTINGS.json SCRIPT",
+            "  route.py --explain PROMPT    # classifier only; does not run a model\n"
+            "  route.py                     # Claude Code UserPromptSubmit hook\n"
+            "  route.py --install-hook SETTINGS.json SCRIPT\n"
+            "  smoke.py                     # real Claude Code session; checks the agent that ran",
             file=sys.stderr,
         )
         return 0
