@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Run one prompt in Claude Code and check which subagent actually started.
+"""Run one prompt in Claude Code and check that the subagent finished.
 
 `route.py --explain` only prints the classifier. This starts `claude -p` and
-looks through the stream for an Agent tool call. The main session is forced
-to Sonnet for this run. A subagent model is whatever that call records; when
-the call omits a model, the agent file's alias is the one Claude Code pins.
+requires a successful process, a successful result event, a finished Agent
+tool result, and evidence that the Haiku model ran. An Agent tool call alone
+is not a pass.
 """
 
 from __future__ import annotations
@@ -25,22 +25,64 @@ SYSTEM = (
 )
 
 
-def _agent_calls(events: list[dict]) -> list[dict]:
-    found = []
+def _blocks(event: dict) -> list:
+    message = event.get("message")
+    if isinstance(message, dict) and isinstance(message.get("content"), list):
+        return message["content"]
+    content = event.get("content")
+    return content if isinstance(content, list) else []
+
+
+def evaluate_session(returncode: int, events: list[dict]) -> str | None:
+    """Return an error, or None when the session shows Haiku finished the task."""
+    if returncode != 0:
+        return f"claude exit {returncode}"
+
+    calls = []
+    results = []
+    final = None
+    usage_names: list[str] = []
     for event in events:
-        message = event.get("message") if isinstance(event, dict) else None
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, list):
+        if not isinstance(event, dict):
             continue
-        for block in content:
-            if not isinstance(block, dict) or block.get("type") != "tool_use":
+        if event.get("type") == "result":
+            final = event
+        usage = event.get("modelUsage")
+        if isinstance(usage, dict):
+            usage_names.extend(str(name) for name in usage)
+        for block in _blocks(event):
+            if not isinstance(block, dict):
                 continue
-            if block.get("name") not in ("Agent", "Task"):
-                continue
-            raw = block.get("input")
-            payload = raw if isinstance(raw, dict) else {}
-            found.append(payload)
-    return found
+            if block.get("type") == "tool_use" and block.get("name") in ("Agent", "Task"):
+                raw = block.get("input")
+                calls.append({"id": block.get("id"), "input": raw if isinstance(raw, dict) else {}})
+            elif block.get("type") == "tool_result":
+                results.append(block)
+
+    if final is None or final.get("is_error") or final.get("subtype") != "success":
+        return "no successful result event"
+    if any(block.get("is_error") for block in results):
+        return "a tool result reported an error"
+    if not calls:
+        return "no Agent tool call"
+
+    call = calls[0]
+    agent = call["input"].get("subagent_type") or call["input"].get("subagent") or call["input"].get("name")
+    if agent != EXPECT_AGENT:
+        return f"expected {EXPECT_AGENT}, got {agent}"
+    if not call["id"]:
+        return "Agent call has no id, so its result cannot be checked"
+    matched = [block for block in results if block.get("tool_use_id") == call["id"]]
+    if not matched:
+        return "Agent call has no tool result, so the agent did not finish"
+    if any(block.get("is_error") for block in matched):
+        return "Agent tool result reported an error"
+
+    model = call["input"].get("model")
+    model_text = model if isinstance(model, str) else ""
+    if EXPECT_MODEL not in model_text and not any(EXPECT_MODEL in name for name in usage_names):
+        return "stream does not show that the agent finished on haiku"
+    return None
 
 
 def main() -> int:
@@ -80,26 +122,16 @@ def main() -> int:
         except json.JSONDecodeError:
             continue
 
-    calls = _agent_calls(events)
     print(f"prompt: {PROMPT}")
     print(f"main model requested: sonnet")
     print(f"claude exit: {completed.returncode}")
     blob = completed.stdout + completed.stderr
     if "authentication_error" in blob or "OAuth access token is invalid" in blob:
         sys.exit("smoke: Claude Code rejected the session (OAuth token invalid). Run `claude`, then /login, and run this again.")
-    if not calls:
+    error = evaluate_session(completed.returncode, events)
+    if error:
         tail = (completed.stderr or completed.stdout)[-1200:]
-        sys.exit(f"smoke: no Agent tool call. Claude did not delegate.\n{tail}")
-
-    call = calls[0]
-    agent = call.get("subagent_type") or call.get("subagent") or call.get("name")
-    model = call.get("model")
-    print(f"agent: {agent}")
-    print(f"model on the Agent call: {model or '(omitted; agent file pins ' + EXPECT_MODEL + ')'}")
-    if agent != EXPECT_AGENT:
-        sys.exit(f"smoke: expected {EXPECT_AGENT}, got {agent}")
-    if model and model != EXPECT_MODEL:
-        sys.exit(f"smoke: expected model {EXPECT_MODEL}, got {model}")
+        sys.exit(f"smoke: {error}\n{tail}")
     print("smoke: pass")
     return 0
 

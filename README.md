@@ -18,7 +18,7 @@ The main session stays on Sonnet and coordinates. `init.sh` sets `"model": "sonn
 
 `haiku`, `sonnet`, and `opus` are aliases for the latest model in that family. A new Sonnet release does not require an edit to the agent file.
 
-A one-stage sentence goes to that subagent. "Review log ... xem có lỗi không" is Haiku. "Không cần lên plan, fix bug này" drops the cancelled plan and stays on Sonnet. "Lên plan rồi implement và make PR" is not one Opus task: the main session reads it and runs plan, then implement, then the PR.
+A one-stage sentence goes to that subagent. "Review log ... xem có lỗi không" is Haiku. "Không cần lên plan, fix bug này" drops the cancelled plan and stays on Sonnet. "Check log rồi make PR" is two Haiku spawns, one for the log and one for the PR. "Lên kế hoạch sửa bug này" is ambiguous: the main session decides whether that is only a plan before it adds an implement stage. "Lên plan rồi implement và make PR" runs plan, then implement, then the PR.
 
 The `UserPromptSubmit` hook only inserts that hint into context. It does not switch the model and it does not start the subagent. Claude Code still has to call the Agent tool. [Hooks](https://code.claude.com/docs/en/hooks) document `additionalContext` as added context.
 

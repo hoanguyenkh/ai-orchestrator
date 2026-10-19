@@ -25,6 +25,8 @@ Fix and review share the `tier-sonnet` definition. Spawn it twice so the reviewe
 
 A clear one-stage request goes to that one subagent. "Lên plan để fix bug" is a plan whose subject is the bug, so only `tier-opus` runs. "Không cần lên plan, fix bug này" drops the negated plan and only implements. "Review log ... xem có lỗi không" is log triage on `tier-haiku`, not a code review.
 
-A sentence that asks for several stages, such as "lên plan rồi implement và make PR", is not one Opus task. Read it, skip stages the user negated, delegate each remaining stage, and finish all of them. `tier-opus` only writes the plan.
+A sentence that asks for several stages, such as "lên plan rồi implement và make PR", is not one Opus task. Spawn each stage on its own, even when two stages use the same model: "check log rồi make PR" is `tier-haiku` for the log, then a fresh `tier-haiku` for the PR.
+
+If the wording is only a plan whose subject is a change, such as "lên kế hoạch sửa bug này", decide that before spawning. Do not add an implement stage unless the user asked for the fix to be carried out. `tier-opus` only writes the plan.
 
 An explicit @-mention overrides this.

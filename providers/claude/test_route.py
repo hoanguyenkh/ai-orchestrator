@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from route import classify, hook_payload, install_hook
+from smoke import evaluate_session
 
 
 class RouteTests(unittest.TestCase):
@@ -59,6 +60,47 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(decision["rule"], "split")
         self.assertIsNone(decision["agent"])
         self.assertEqual(decision["signals"], ["plan", "implement", "pr"])
+        self.assertEqual(
+            decision["stages"],
+            [
+                {"stage": "plan", "agent": "tier-opus"},
+                {"stage": "implement", "agent": "tier-sonnet"},
+                {"stage": "pr", "agent": "tier-haiku"},
+            ],
+        )
+
+    def test_log_then_pr_is_two_haiku_stages(self):
+        decision = classify("check log rồi make PR")
+        self.assertEqual(decision["rule"], "split")
+        self.assertIsNone(decision["agent"])
+        self.assertEqual(
+            decision["stages"],
+            [
+                {"stage": "log", "agent": "tier-haiku"},
+                {"stage": "pr", "agent": "tier-haiku"},
+            ],
+        )
+
+    def test_log_then_bump_tag_is_two_haiku_stages(self):
+        decision = classify("check log service payment rồi bump image tag")
+        self.assertEqual(decision["rule"], "split")
+        self.assertIsNone(decision["agent"])
+        self.assertEqual(
+            decision["stages"],
+            [
+                {"stage": "log", "agent": "tier-haiku"},
+                {"stage": "pr", "agent": "tier-haiku"},
+            ],
+        )
+
+    def test_plan_wording_without_a_sequence_asks_before_acting(self):
+        decision = classify("lên kế hoạch sửa bug này")
+        self.assertEqual(decision["rule"], "confirm")
+        self.assertIsNone(decision["agent"])
+        self.assertEqual(decision["signals"], ["plan", "implement"])
+        text = hook_payload("lên kế hoạch sửa bug này")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("before spawning", text)
+        self.assertIn("Do not add an implement", text)
 
     def test_make_pr_and_bump_tag_is_haiku(self):
         decision = classify("Make Pr & bump image tag")
@@ -120,14 +162,16 @@ class RouteTests(unittest.TestCase):
         self.assertIsNone(decision["agent"])
         self.assertEqual(decision["signals"], ["log", "implement"])
 
-    def test_split_hook_does_not_assign_one_agent(self):
-        payload = hook_payload("lên plan rồi implement và make PR")
-        text = payload["hookSpecificOutput"]["additionalContext"]
-        self.assertNotIn("tier-opus`", text.split("Delegate each stage")[0])
-        self.assertIn("do not send it to one subagent", text)
-        self.assertIn("tier-opus", text)
-        self.assertIn("tier-haiku", text)
-        self.assertIn("fresh tier-sonnet", text)
+    def test_split_hook_lists_each_stage(self):
+        text = hook_payload("lên plan rồi implement và make PR")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("even when they use the same model", text)
+        self.assertIn("- plan -> `tier-opus`", text)
+        self.assertIn("- implement -> `tier-sonnet`", text)
+        self.assertIn("- pr -> `tier-haiku`", text)
+
+    def test_same_model_split_hook_spawns_haiku_twice(self):
+        text = hook_payload("check log rồi make PR")["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(text.count("`tier-haiku`"), 2)
 
     def test_install_hook_quotes_paths_and_sets_main_model(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -146,6 +190,59 @@ class RouteTests(unittest.TestCase):
             again = json.loads(settings.read_text(encoding="utf-8"))
             self.assertEqual(len(again["hooks"]["UserPromptSubmit"]), 1)
             self.assertEqual(len(again["hooks"]["UserPromptSubmit"][0]["hooks"]), 1)
+
+
+def _agent_call(model="haiku"):
+    payload = {"subagent_type": "tier-haiku"}
+    if model is not None:
+        payload["model"] = model
+    return {
+        "type": "assistant",
+        "message": {"content": [{"type": "tool_use", "name": "Agent", "id": "call-1", "input": payload}]},
+    }
+
+
+def _tool_result(is_error=False):
+    return {
+        "type": "user",
+        "message": {
+            "content": [{"type": "tool_result", "tool_use_id": "call-1", "is_error": is_error, "content": "ready"}]
+        },
+    }
+
+
+def _result(is_error=False):
+    return {"type": "result", "subtype": "success", "is_error": is_error, "result": "ready"}
+
+
+class SmokeEvaluationTests(unittest.TestCase):
+    def test_exit_code_and_failed_result_do_not_pass(self):
+        events = [_agent_call(), _result(is_error=True)]
+        self.assertEqual(evaluate_session(1, events), "claude exit 1")
+
+    def test_successful_exit_with_an_error_result_does_not_pass(self):
+        events = [_agent_call(), _tool_result(), _result(is_error=True)]
+        self.assertEqual(evaluate_session(0, events), "no successful result event")
+
+    def test_tool_result_error_does_not_pass(self):
+        events = [_agent_call(), _tool_result(is_error=True), _result()]
+        self.assertEqual(evaluate_session(0, events), "a tool result reported an error")
+
+    def test_agent_call_without_a_finished_result_does_not_pass(self):
+        events = [_agent_call(), _result()]
+        self.assertIn("did not finish", evaluate_session(0, events))
+
+    def test_missing_model_evidence_does_not_pass(self):
+        events = [_agent_call(model=None), _tool_result(), _result()]
+        self.assertIn("finished on haiku", evaluate_session(0, events))
+
+    def test_finished_haiku_call_passes(self):
+        events = [_agent_call(), _tool_result(), _result()]
+        self.assertIsNone(evaluate_session(0, events))
+
+    def test_model_usage_can_prove_haiku_ran(self):
+        events = [_agent_call(model=None), _tool_result(), _result(), {"type": "result", "subtype": "success", "is_error": False, "modelUsage": {"claude-haiku-4-5": {}}}]
+        self.assertIsNone(evaluate_session(0, events))
 
 
 if __name__ == "__main__":

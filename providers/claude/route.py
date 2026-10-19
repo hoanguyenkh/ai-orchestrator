@@ -2,10 +2,10 @@
 """Route a Claude Code prompt to subagents.
 
 Clear, single-intent requests get one suggested subagent. A negated intent is
-dropped, so "không cần lên plan, fix bug này" stays a fix. A request that
-asks for more than one model is "split": the hook does not assign it to a
-single agent. The main session, on Sonnet, reads the sentence and delegates
-each stage.
+dropped, so "không cần lên plan, fix bug này" stays a fix. Two or more stages
+split even when they share a model, so "check log rồi make PR" is two Haiku
+spawns. Several signals without a sequence word are "confirm": the main
+Sonnet session decides the intent before any extra stage runs.
 """
 
 from __future__ import annotations
@@ -164,30 +164,32 @@ def _decision(rule: str, tier: str | None, signals: list[str], stages: list[dict
     }
 
 
+_STAGE_AGENT = {
+    "plan": "tier-opus",
+    "log": "tier-haiku",
+    "implement": "tier-sonnet",
+    "review": "tier-sonnet",
+    "pr": "tier-haiku",
+}
+
+
+def _stage_list(names: list[str]) -> list[dict]:
+    return [{"stage": name, "agent": _STAGE_AGENT[name]} for name in names]
+
+
 def classify(task: str) -> dict:
     text = fold(task)
     signals = _signals(text)
     if _plan_subject_only(text, signals):
         signals = {"plan": signals["plan"]}
     names = [name for name in _SIGNAL_ORDER if name in signals]
-    agents = []
-    for name in names:
-        tier = {"plan": "opus", "log": "haiku", "implement": "sonnet", "review": "sonnet", "pr": "haiku"}[name]
-        if tier not in agents:
-            agents.append(tier)
 
-    if len(agents) > 1:
-        return _decision("split", None, names, None)
     if names == ["implement", "review"]:
-        return _decision(
-            "fix-and-review",
-            "sonnet",
-            names,
-            [
-                {"stage": "implement", "agent": "tier-sonnet"},
-                {"stage": "review", "agent": "tier-sonnet"},
-            ],
-        )
+        return _decision("fix-and-review", "sonnet", names, _stage_list(names))
+    if len(names) > 1 and _SEQUENCE.search(text):
+        return _decision("split", None, names, _stage_list(names))
+    if len(names) > 1:
+        return _decision("confirm", None, names, None)
     if names == ["plan"]:
         return _decision("plan", "opus", names, [{"stage": "plan", "agent": "tier-opus"}])
     if names == ["log"]:
@@ -204,13 +206,23 @@ def classify(task: str) -> dict:
 def hook_payload(task: str) -> dict:
     decision = classify(task)
     if decision["rule"] == "split":
+        lines = "\n".join(f"- {stage['stage']} -> `{stage['agent']}`" for stage in decision["stages"])
+        context = (
+            "Orchestrator hint only. These are separate stages, even when they use the same model. "
+            "Do not send the whole request to one subagent. Spawn each stage on its own:\n"
+            f"{lines}\n"
+            "Finish every stage. An explicit @-mention overrides this hint."
+        )
+    elif decision["rule"] == "confirm":
         noticed = ", ".join(decision["signals"]) or "none"
         context = (
-            "Orchestrator hint only. This sentence looks multi-step, so do not send it to one subagent. "
-            f"Keyword signals noticed: {noticed}. Read the user's sentence yourself and skip anything they negated. "
-            "You are the coordinator on the main Sonnet session. Delegate each stage that they actually asked for:\n"
+            "Orchestrator hint only. This sentence is ambiguous. "
+            f"Keyword signals noticed: {noticed}. Decide the user's intent before spawning any subagent. "
+            "Do not add an implement, review, log, or PR stage unless they asked for that work to be carried out. "
+            "If they only want a plan, delegate only that stage to `tier-opus`. "
+            "If they want several stages, spawn each one separately:\n"
             f"{_STAGE_TABLE}\n"
-            "Finish every requested stage. An explicit @-mention overrides this hint."
+            "An explicit @-mention overrides this hint."
         )
     elif decision["rule"] == "fix-and-review":
         context = (
