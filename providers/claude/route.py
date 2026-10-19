@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Route a Claude Code prompt to subagents.
+"""Route a Claude Code prompt across the main Sonnet session and subagents.
 
-Clear, single-intent requests get one suggested subagent. A negated intent is
-dropped, so "không cần lên plan, fix bug này" stays a fix. Two or more stages
-split in the order they appear, even when they share a model, so "check log
-rồi make PR" is two Haiku spawns. Several signals without a sequence word
-between them are "confirm": the main Sonnet session decides the intent before
-any extra stage runs.
+The main session already runs on Sonnet, so implementation, improvement, code
+review, and re-review stay directly on the main session in one shared context
+with zero subagent spawn overhead. Subagents are only spawned when switching
+models or isolating noisy mechanical work:
+  - plan            -> tier-opus (opus)
+  - log check       -> tier-haiku (haiku)
+  - PR / bump tag   -> tier-haiku (haiku)
+  - implement/review/default -> main session (sonnet)
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from pathlib import Path
 
 AGENTS = {
     "haiku": "tier-haiku",
-    "sonnet": "tier-sonnet",
+    "sonnet": "main",
     "opus": "tier-opus",
 }
 
@@ -76,14 +78,13 @@ _NEGATION_BEFORE = re.compile(
     r"\bdung nen\b|\bdung\b|\bdon'?t\b|\bdo not\b|\bno need(?: to)?\b|"
     r"\bskip\b|\bwithout\b|\bbo qua\b)\s*$"
 )
-_EXPLICIT_AGENT = re.compile(r"@(?:\"|\b)(?:agent-)?tier-(?:haiku|sonnet|opus)\b", re.IGNORECASE)
+_EXPLICIT_AGENT = re.compile(r"@(?:\"|\b)(?:agent-)?(?:tier-(?:haiku|opus)|explore)\b", re.IGNORECASE)
 
 _STAGE_TABLE = """\
-- planning -> tier-opus
-- log triage -> tier-haiku
-- implementation -> a fresh tier-sonnet
-- independent review -> another fresh tier-sonnet, separate from the implementer
-- PR and image-tag bump -> tier-haiku"""
+- planning -> `tier-opus` subagent
+- log triage -> `tier-haiku` subagent
+- implementation, review, and re-review -> directly on the main Sonnet session (do NOT spawn a subagent)
+- PR, merge, and image-tag bump -> `tier-haiku` subagent"""
 
 
 def fold(text: str) -> str:
@@ -191,8 +192,8 @@ def _decision(rule: str, tier: str | None, signals: list[str], stages: list[dict
 _STAGE_AGENT = {
     "plan": "tier-opus",
     "log": "tier-haiku",
-    "implement": "tier-sonnet",
-    "review": "tier-sonnet",
+    "implement": "main",
+    "review": "main",
     "pr": "tier-haiku",
 }
 
@@ -206,8 +207,9 @@ def classify(task: str) -> dict:
     signals = _drop_plan_subjects(text, _signals(text))
     names = _ordered_names(signals)
 
-    if names == ["implement", "review"]:
-        return _decision("fix-and-review", "sonnet", names, _stage_list(names))
+    if set(names) and set(names).issubset({"implement", "review"}):
+        rule = "fix-and-review" if len(names) == 2 else names[0]
+        return _decision(rule, "sonnet", names, _stage_list(names))
     if len(names) > 1 and _has_sequence_between(text, signals, names):
         return _decision("split", None, names, _stage_list(names))
     if len(names) > 1:
@@ -218,42 +220,41 @@ def classify(task: str) -> dict:
         return _decision("log-check", "haiku", names, [{"stage": "log", "agent": "tier-haiku"}])
     if names == ["pr"]:
         return _decision("pr-or-bump", "haiku", names, [{"stage": "pr", "agent": "tier-haiku"}])
-    if names == ["implement"]:
-        return _decision("implement", "sonnet", names, [{"stage": "implement", "agent": "tier-sonnet"}])
-    if names == ["review"]:
-        return _decision("review", "sonnet", names, [{"stage": "review", "agent": "tier-sonnet"}])
-    return _decision("default", "sonnet", names, [{"stage": "default", "agent": "tier-sonnet"}])
+    return _decision("default", "sonnet", names, [{"stage": "default", "agent": "main"}])
 
 
-def hook_payload(task: str) -> dict:
+def _format_stage(stage: dict) -> str:
+    if stage["agent"] == "main":
+        return f"- {stage['stage']} -> handle directly on the main Sonnet session (do NOT spawn a subagent)"
+    return f"- {stage['stage']} -> `{stage['agent']}`"
+
+
+def hook_payload(task: str) -> dict | None:
     decision = classify(task)
+    if decision["agent"] == "main":
+        # Main session is already Sonnet: do not inject extra prompt tokens or spawn a subagent.
+        return None
     if decision["rule"] == "split":
-        lines = "\n".join(f"- {stage['stage']} -> `{stage['agent']}`" for stage in decision["stages"])
+        lines = "\n".join(_format_stage(stage) for stage in decision["stages"])
         context = (
-            "Orchestrator hint only. These are separate stages, even when they use the same model. "
-            "Do not send the whole request to one subagent. Spawn each stage on its own:\n"
+            "Orchestrator hint only. Run each stage in order:\n"
             f"{lines}\n"
-            "For `implement` and `review`, always use two separate `tier-sonnet` spawns so the reviewer has clean context. "
+            "Do `implement`, `review`, and any re-review directly on the main Sonnet session in this same context "
+            "instead of spawning `tier-sonnet`. Only spawn subagents for `tier-opus` and `tier-haiku` stages. "
             "Respect conditional gates in the prompt (e.g., 'nếu có issues', 'ok thì'): if log triage finds no evidence of errors, stop there; "
-            "if review finds issues, re-run implement and review before moving to the release stage. "
+            "if review finds issues, fix and re-review on the main session before moving to the release stage. "
             "An explicit @-mention overrides this hint."
         )
     elif decision["rule"] == "confirm":
         noticed = ", ".join(decision["signals"]) or "none"
         context = (
             "Orchestrator hint only. This sentence is ambiguous. "
-            f"Keyword signals noticed: {noticed}. Decide the user's intent before spawning any subagent. "
+            f"Keyword signals noticed: {noticed}. Decide the user's intent before acting. "
             "Do not add an implement, review, log, or PR stage unless they asked for that work to be carried out. "
             "If they only want a plan, delegate only that stage to `tier-opus`. "
-            "If they want several stages, spawn each one separately:\n"
+            "If they want several stages:\n"
             f"{_STAGE_TABLE}\n"
             "An explicit @-mention overrides this hint."
-        )
-    elif decision["rule"] == "fix-and-review":
-        context = (
-            "Orchestrator hint only. Spawn `tier-sonnet` twice. "
-            "The first spawn implements the fix. The second spawn is a fresh reviewer with its own context and only reviews. "
-            "Do not let the implementer review its own change. An explicit @-mention overrides this hint."
         )
     else:
         context = (
@@ -274,6 +275,8 @@ def install_hook(settings_path: Path, script_path: Path) -> None:
     if settings_path.exists():
         settings = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
     settings["model"] = "sonnet"
+    env = settings.setdefault("env", {})
+    env["CLAUDE_CODE_SUBAGENT_MODEL"] = "haiku"
     hooks = settings.setdefault("hooks", {})
     groups = hooks.setdefault("UserPromptSubmit", [])
     entry = {"type": "command", "command": shlex.quote(str(script_path)), "timeout": 10}
@@ -313,7 +316,10 @@ def _hook_main() -> int:
     stripped = prompt.strip()
     if not stripped or stripped.startswith("/") or _EXPLICIT_AGENT.search(stripped):
         return 0
-    json.dump(hook_payload(stripped), sys.stdout, ensure_ascii=False)
+    out = hook_payload(stripped)
+    if out is None:
+        return 0
+    json.dump(out, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0
 

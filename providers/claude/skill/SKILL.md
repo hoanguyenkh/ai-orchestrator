@@ -1,32 +1,30 @@
 ---
 name: model-router
 description: >
-  Split a request into stages and delegate each stage to the Claude Code
-  subagent pinned to the fitting model. Use before delegating work, and
-  whenever the user mentions routing, which model, Haiku, Sonnet, Opus,
-  check log, lên plan, fix, review, make PR, or bump image tag.
+  Split a request into stages: keep Sonnet work on the main session and
+  delegate Haiku/Opus stages to their pinned subagents. Use before delegating
+  work, and whenever the user mentions routing, which model, Haiku, Sonnet,
+  Opus, check log, lên plan, fix, review, make PR, or bump image tag.
 ---
 
 # Model router
 
-The main session stays on Sonnet and coordinates. It does not do the stage work itself. A hook hint is context, not a model switch: you still have to call the Agent tool.
+The main session runs on Sonnet (`"model": "sonnet"`). To avoid cold-start latency and duplicate file reads, **do all Sonnet work directly on the main session**. Only call the `Agent` tool when switching to Opus or Haiku.
 
-Route each stage separately:
+Route each stage:
 
-- plan code or plan a feature -> `tier-opus` (`model: opus`, the latest Opus alias)
-- check logs of a service or an agent -> `tier-haiku` (`model: haiku`, the latest Haiku alias)
-- implement or improve -> a fresh `tier-sonnet` (`model: sonnet`, the latest Sonnet alias)
-- review code -> another fresh `tier-sonnet`
-- PR and image-tag bump -> `tier-haiku`
+- plan code or plan a feature -> `tier-opus` subagent (`model: opus`, `effort: high`)
+- check logs of a service or an agent -> `tier-haiku` subagent (`model: haiku`, `effort: medium`, `omitClaudeMd: true`)
+- implement, improve, review, re-review, and general tasks -> **main Sonnet session directly** (do NOT spawn a subagent)
+- PR, merge, and image-tag bump -> `tier-haiku` subagent
 
-Those `model` values are aliases. When Sonnet 5.8 or a later Haiku or Opus ships, leave the alias. Do not write a versioned id into the agent file.
+Those `model` values are aliases for the latest model in each family. Do not write a versioned model ID into agent files.
 
-Fix and review share the `tier-sonnet` definition. Spawn it twice so the reviewer does not see the implementer's context.
+Because implementation, review, and re-review stay on the main Sonnet session, all files already read stay in the main prompt cache with zero subagent round-trip.
 
-A clear one-stage request goes to that one subagent. "Lên plan để fix bug" is a plan whose subject is the bug, so only `tier-opus` runs. "Không cần lên plan, fix bug này" drops the negated plan and only implements. "Review log ... xem có lỗi không" is log triage on `tier-haiku`, not a code review.
+For multi-stage prompts (such as "check log 4 agent sau đó fix nếu có issues, review & fix ok thì make PR & merge to main, sau đó bump image tag"):
+1. Spawn `tier-haiku` to check the logs. If it reports no evidence of errors, stop.
+2. Fix, review, and re-review directly on the main Sonnet session until clean.
+3. Spawn `tier-haiku` to open/merge the PR and bump the image tag.
 
-A sentence that asks for several stages, such as "lên plan rồi implement và make PR", is not one Opus task. Spawn each stage on its own, even when two stages use the same model: "check log rồi make PR" is `tier-haiku` for the log, then a fresh `tier-haiku` for the PR. Respect conditional gates (`nếu có issues`, `ok thì`): stop if log triage finds no errors, and only run the final `tier-haiku` PR/merge/bump stage after the fresh `tier-sonnet` review passes.
-
-If the wording is only a plan whose subject is a change, such as "lên kế hoạch sửa bug này", decide that before spawning. Do not add an implement stage unless the user asked for the fix to be carried out. `tier-opus` only writes the plan.
-
-An explicit @-mention overrides this.
+An explicit @-mention (`@tier-haiku`, `@tier-opus`) overrides this.

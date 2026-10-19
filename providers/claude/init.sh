@@ -20,14 +20,15 @@ backup_file() {
 
 mkdir -p "$CLAUDE/agents" "$CLAUDE/skills/model-router" "$CLAUDE/hooks"
 
-for name in tier-haiku.md tier-sonnet.md tier-opus.md; do
+for name in tier-haiku.md tier-opus.md Explore.md; do
   backup_file "$CLAUDE/agents/$name" "agents/$name"
 done
+rm -f "$CLAUDE/agents/tier-sonnet.md"
 backup_file "$CLAUDE/skills/model-router/SKILL.md" "skills/model-router/SKILL.md"
 backup_file "$HOOK" "hooks/orchestrator-route.py"
 backup_file "$CLAUDE/settings.json" "settings.json"
 
-cp "$ROOT/agents/"tier-*.md "$CLAUDE/agents/"
+cp "$ROOT/agents/"*.md "$CLAUDE/agents/"
 cp "$ROOT/skill/SKILL.md" "$CLAUDE/skills/model-router/SKILL.md"
 cp "$ROOT/route.py" "$HOOK"
 chmod +x "$HOOK"
@@ -35,10 +36,10 @@ chmod +x "$HOOK"
 python3 "$ROOT/route.py" --install-hook "$CLAUDE/settings.json" "$HOOK"
 
 echo "Updated Claude Code config in $CLAUDE"
-echo "  agents: tier-haiku, tier-sonnet, tier-opus (no tools allowlist; MCP is inherited)"
+echo "  agents: tier-haiku, tier-opus, Explore (Sonnet runs on main session; MCP is inherited)"
 echo "  skill:  skills/model-router"
 echo "  hook:   UserPromptSubmit -> $HOOK"
-echo "  model:  main session set to sonnet"
+echo "  model:  main session set to sonnet, default subagent model set to haiku"
 if [ -d "$BACKUP" ]; then
   echo "  backup: $BACKUP"
 else

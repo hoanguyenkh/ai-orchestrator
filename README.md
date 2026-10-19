@@ -4,25 +4,21 @@ Route each task to the model that fits it. Claude Code is the first provider. Co
 
 ## Claude Code
 
-Three [subagents](https://code.claude.com/docs/en/sub-agents) live in `~/.claude/agents/`. Each file pins a model alias and leaves `tools` unset, so the subagent inherits the session tool pool, including MCP. A `tools` allowlist would drop MCP.
+The main session runs on `sonnet` (`init.sh` sets `"model": "sonnet"` and `"CLAUDE_CODE_SUBAGENT_MODEL": "haiku"` in `~/.claude/settings.json`). To keep latency and token usage low, **Sonnet tasks run directly on the main session** with zero subagent spawn overhead, while **Opus** and **Haiku** stages are delegated to [subagents](https://code.claude.com/docs/en/sub-agents) in `~/.claude/agents/`. Each subagent sets `disallowedTools: Agent` so it cannot spawn nested subagents, while inheriting all other tools including MCP.
 
-The main session stays on Sonnet and coordinates. `init.sh` sets `"model": "sonnet"` in `~/.claude/settings.json`.
-
-| Stage | Subagent | Model |
+| Stage | Where it runs | Model |
 | --- | --- | --- |
-| Check logs of a service or an agent | `tier-haiku` | `haiku` |
-| Make a PR or bump an image tag | `tier-haiku` | `haiku` |
-| Plan code or plan a feature | `tier-opus` | `opus` |
-| Implement or improve | a fresh `tier-sonnet` | `sonnet` |
-| Review code | a second fresh `tier-sonnet` | `sonnet` |
+| Built-in codebase search (`Explore`) | `Explore` override (`effort: low`, `omitClaudeMd: true`, read-only) | `haiku` |
+| Check logs of a service or an agent | `tier-haiku` subagent (`effort: medium`, `omitClaudeMd: true`, `maxTurns: 15`) | `haiku` |
+| Make/merge a PR or bump an image tag | `tier-haiku` subagent (`effort: medium`, `omitClaudeMd: true`, `maxTurns: 15`) | `haiku` |
+| Plan code or plan a feature | `tier-opus` subagent (`effort: high`) | `opus` |
+| Implement, improve, review, re-review, and everything else | **Main session directly** (shared context & prompt cache) | `sonnet` |
 
-`haiku`, `sonnet`, and `opus` are aliases for the latest model in that family. A new Sonnet release does not require an edit to the agent file.
+`haiku`, `sonnet`, and `opus` are aliases for the latest model in that family. A new Sonnet release does not require an edit to the agent files.
 
-A one-stage sentence goes to that subagent. "Review log ... xem có lỗi không" is Haiku. "Không cần lên plan, fix bug này" drops the cancelled plan and stays on Sonnet. "Check log rồi make PR" is two Haiku spawns, one for the log and one for the PR. "Lên kế hoạch sửa bug này" is ambiguous: the main session decides whether that is only a plan before it adds an implement stage. "Lên plan rồi implement và make PR" runs plan, then implement, then the PR.
+When a prompt only asks for Sonnet work (fix, implement, improve, review, re-review), the `UserPromptSubmit` hook stays silent and the main Sonnet session handles it immediately. When a prompt needs Haiku, Opus, or multiple stages, the hook injects a routing hint so the main session delegates the Haiku/Opus stages and keeps the code/review stages on itself.
 
-The `UserPromptSubmit` hook only inserts that hint into context. It does not switch the model and it does not start the subagent. Claude Code still has to call the Agent tool. [Hooks](https://code.claude.com/docs/en/hooks) document `additionalContext` as added context.
-
-Install or update. The script backs up anything it is about to replace under `~/.claude/orchestrator-backups/<timestamp>/`.
+Install or update (backs up existing files under `~/.claude/orchestrator-backups/<timestamp>/`):
 
 ```bash
 providers/claude/init.sh
@@ -34,7 +30,7 @@ providers/claude/init.sh
 python3 providers/claude/route.py --explain "review log service payment xem có lỗi không"
 ```
 
-To see which agent a real session starts, run the smoke test. It sends one log-check prompt through `claude -p` and fails if the Agent tool did not call `tier-haiku`:
+To see which agent a real session starts, run the smoke test:
 
 ```bash
 python3 providers/claude/smoke.py
