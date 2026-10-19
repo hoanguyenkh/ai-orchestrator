@@ -208,6 +208,22 @@ class RouteTests(unittest.TestCase):
             self.assertEqual(decision["agent"], "tier-sonnet", prompt)
             self.assertEqual(decision["rule"], "implement", prompt)
 
+    def test_conditional_log_fix_review_pr_bump_pipeline(self):
+        prompt = "check log 4 agent sau đó fix nếu có issues, review & fix ok thì make PR & merge to main, sau đó bump image tag to xxxx"
+        decision = classify(prompt)
+        self.assertEqual(decision["rule"], "split")
+        self.assertEqual(
+            decision["stages"],
+            [
+                {"stage": "log", "agent": "tier-haiku"},
+                {"stage": "implement", "agent": "tier-sonnet"},
+                {"stage": "review", "agent": "tier-sonnet"},
+                {"stage": "pr", "agent": "tier-haiku"},
+            ],
+        )
+        text = hook_payload(prompt)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Respect conditional gates", text)
+
     def test_hook_stays_silent_on_slash_commands_and_explicit_mentions(self):
         for prompt in ("/agents", "@tier-haiku fix this", "@agent-tier-opus check log"):
             stdin = io.StringIO(json.dumps({"prompt": prompt}))

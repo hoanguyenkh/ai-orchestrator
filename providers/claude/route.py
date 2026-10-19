@@ -54,28 +54,19 @@ _IMPLEMENT_RE = re.compile(
 _REVIEW_RE = re.compile(r"\b(?:reviews?|reviewing|code review)\b")
 _REVIEW_LOG_RE = re.compile(r"\breviews?\s+(?:the\s+)?(?:(?:service|agent)\s+)?logs?\b")
 _PR_RES = (
-    re.compile(r"\b(?:make|tao|mo|open|create)\s+(?:a\s+)?pr\b"),
-    re.compile(r"\b(?:make|tao|mo|open|create)\s+(?:a\s+)?pull request\b"),
+    re.compile(r"\b(?:make|tao|mo|open|create|merge)\s+(?:a\s+)?(?:pr|pull request)\b"),
+    re.compile(r"\bmerge\s+(?:to|into|vao)\s+\w+\b"),
     re.compile(r"\bgh pr\b"),
     re.compile(r"\b(?:bump|update|cap nhat|nang|doi|change)(?:\s+\w+){0,2}\s+(?:image(?:\s+tag)?|tag)\b"),
 )
 _LOG_RES = (
-    re.compile(r"\bcheck logs?\b"),
-    re.compile(r"\bkiem tra logs?\b"),
-    re.compile(r"\bxem logs?\b"),
-    re.compile(r"\bdoc logs?\b"),
-    re.compile(r"\bread(?:\s+the)?\s+logs?\b"),
+    re.compile(r"\b(?:check|kiem tra|xem|doc|read|tail)\s+(?:the\s+)?logs?(?:\s+(?:cua|\d+))?(?:\s+(?:service|agent|pod)s?)?\b"),
     re.compile(r"\breviews?\s+(?:the\s+)?(?:(?:service|agent)\s+)?logs?\b"),
-    re.compile(r"\bservice logs?\b"),
-    re.compile(r"\bpod logs?\b"),
-    re.compile(r"\bkubectl logs?\b"),
-    re.compile(r"\bdebug logs?\b"),
-    re.compile(r"\btail logs?\b"),
-    re.compile(r"\blogs?\s+cua\s+(?:service|agent)\b"),
-    re.compile(r"\bagent logs?\b"),
+    re.compile(r"\b(?:service|pod|kubectl|debug|agent)\s+logs?\b"),
+    re.compile(r"\blogs?\s+(?:cua\s+)?(?:\d+\s+)?(?:service|agent|pod)s?\b"),
 )
 _LOG_WORD = re.compile(r"\blogs?\b")
-_LOG_SIGNAL = re.compile(r"\b(?:bug|bugs|loi|error|errors|exception|exceptions)\b")
+_LOG_SIGNAL = re.compile(r"\b(?:bug|bugs|loi|error|errors|exception|exceptions|issue|issues)\b")
 _SEQUENCE = re.compile(r"\b(?:roi|sau do|tiep theo|then|and then|and|va)\b")
 _PURPOSE = re.compile(r"\b(?:de|cho|for|to)\b")
 # Explicit cancellation in front of an intent. A trailing "không" in
@@ -242,7 +233,10 @@ def hook_payload(task: str) -> dict:
             "Orchestrator hint only. These are separate stages, even when they use the same model. "
             "Do not send the whole request to one subagent. Spawn each stage on its own:\n"
             f"{lines}\n"
-            "Finish every stage. An explicit @-mention overrides this hint."
+            "For `implement` and `review`, always use two separate `tier-sonnet` spawns so the reviewer has clean context. "
+            "Respect conditional gates in the prompt (e.g., 'nếu có issues', 'ok thì'): if log triage finds no evidence of errors, stop there; "
+            "if review finds issues, re-run implement and review before moving to the release stage. "
+            "An explicit @-mention overrides this hint."
         )
     elif decision["rule"] == "confirm":
         noticed = ", ".join(decision["signals"]) or "none"

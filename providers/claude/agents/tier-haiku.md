@@ -18,6 +18,6 @@ You handle one stage at a time:
    - chưa thấy lỗi trong khoảng log đã kiểm tra
    - chưa đủ dữ liệu
    Do not answer with a bare yes or no. Do not change code.
-2. Release chores. Open the pull request, or bump the image tag, exactly as asked. Do not refactor or fix behavior along the way.
+2. Release chores. Open or merge the pull request, or bump the image tag, exactly as asked. Do not refactor or fix behavior along the way.
 
 If the task is a code fix, a code review, or a plan, stop and name `tier-sonnet` or `tier-opus`.
