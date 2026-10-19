@@ -3,8 +3,8 @@ name: tier-sonnet
 description: >
   Use proactively to implement, improve, or review code. Spawn this agent once
   per stage: one fresh spawn implements or improves, and a second fresh spawn reviews.
-  Do not use it to check service logs, open a pull request, bump an image
-  tag, or write the coding plan.
+  Do not use it to check service or agent logs, open a pull request, bump an
+  image tag, or write the coding plan.
 model: sonnet
 effort: high
 color: blue

@@ -3,9 +3,10 @@
 
 Clear, single-intent requests get one suggested subagent. A negated intent is
 dropped, so "không cần lên plan, fix bug này" stays a fix. Two or more stages
-split even when they share a model, so "check log rồi make PR" is two Haiku
-spawns. Several signals without a sequence word are "confirm": the main
-Sonnet session decides the intent before any extra stage runs.
+split in the order they appear, even when they share a model, so "check log
+rồi make PR" is two Haiku spawns. Several signals without a sequence word
+between them are "confirm": the main Sonnet session decides the intent before
+any extra stage runs.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ AGENTS = {
     "opus": "tier-opus",
 }
 
-# Stable order used when reporting which signals fired.
 _SIGNAL_ORDER = ("plan", "log", "implement", "review", "pr")
 
 _PLAN_RES = (
@@ -44,19 +44,20 @@ _PLAN_RES = (
     re.compile(r"\barchitecture plan\b"),
 )
 _IMPLEMENT_RE = re.compile(
-    r"\b(?:fix|fixes|fixing|implement|implements|implementing|improve|improves|improving|improvement|"
-    r"cai thien|sua bug|sua loi|sua code|fix bug)\b"
+    r"\b(?:"
+    r"fix(?:\s+(?:the\s+)?(?:bugs?|errors?|exceptions?))?|"
+    r"fixes|fixing|implement|implements|implementing|"
+    r"improve|improves|improving|improvement|"
+    r"cai thien|sua bug|sua loi|sua code"
+    r")\b"
 )
 _REVIEW_RE = re.compile(r"\b(?:reviews?|reviewing|code review)\b")
-_REVIEW_LOG_RE = re.compile(r"\breviews?\s+(?:the\s+)?(?:service\s+)?logs?\b")
+_REVIEW_LOG_RE = re.compile(r"\breviews?\s+(?:the\s+)?(?:(?:service|agent)\s+)?logs?\b")
 _PR_RES = (
     re.compile(r"\b(?:make|tao|mo|open|create)\s+(?:a\s+)?pr\b"),
     re.compile(r"\b(?:make|tao|mo|open|create)\s+(?:a\s+)?pull request\b"),
     re.compile(r"\bgh pr\b"),
-    re.compile(r"\bbump(?:\s+the)?\s+image\b"),
-    re.compile(r"\bimage tag\b"),
-    re.compile(r"\bbump tag\b"),
-    re.compile(r"\bcap nhat image tag\b"),
+    re.compile(r"\b(?:bump|update|cap nhat|nang|doi|change)(?:\s+\w+){0,2}\s+(?:image(?:\s+tag)?|tag)\b"),
 )
 _LOG_RES = (
     re.compile(r"\bcheck logs?\b"),
@@ -64,26 +65,27 @@ _LOG_RES = (
     re.compile(r"\bxem logs?\b"),
     re.compile(r"\bdoc logs?\b"),
     re.compile(r"\bread(?:\s+the)?\s+logs?\b"),
-    re.compile(r"\breviews?\s+(?:the\s+)?(?:service\s+)?logs?\b"),
+    re.compile(r"\breviews?\s+(?:the\s+)?(?:(?:service|agent)\s+)?logs?\b"),
     re.compile(r"\bservice logs?\b"),
     re.compile(r"\bpod logs?\b"),
     re.compile(r"\bkubectl logs?\b"),
     re.compile(r"\bdebug logs?\b"),
     re.compile(r"\btail logs?\b"),
-    re.compile(r"\blogs?\s+cua\s+agent\b"),
+    re.compile(r"\blogs?\s+cua\s+(?:service|agent)\b"),
     re.compile(r"\bagent logs?\b"),
 )
 _LOG_WORD = re.compile(r"\blogs?\b")
 _LOG_SIGNAL = re.compile(r"\b(?:bug|bugs|loi|error|errors|exception|exceptions)\b")
-_SEQUENCE = re.compile(r"\b(?:roi|sau do|then|and then|and|va)\b")
-_PURPOSE = re.compile(r"\b(?:de|for|to)\b")
+_SEQUENCE = re.compile(r"\b(?:roi|sau do|tiep theo|then|and then|and|va)\b")
+_PURPOSE = re.compile(r"\b(?:de|cho|for|to)\b")
 # Explicit cancellation in front of an intent. A trailing "không" in
 # "có lỗi không" is a question particle and is not listed here.
 _NEGATION_BEFORE = re.compile(
     r"(?:\bkhong can\b|\bkhong muon\b|\bkhong phai\b|\bchua can\b|"
     r"\bdung nen\b|\bdung\b|\bdon'?t\b|\bdo not\b|\bno need(?: to)?\b|"
-    r"\bskip\b|\bwithout\b|\bbo qua\b)\W*$"
+    r"\bskip\b|\bwithout\b|\bbo qua\b)\s*$"
 )
+_EXPLICIT_AGENT = re.compile(r"@(?:\"|\b)(?:agent-)?tier-(?:haiku|sonnet|opus)\b", re.IGNORECASE)
 
 _STAGE_TABLE = """\
 - planning -> tier-opus
@@ -104,6 +106,11 @@ def _spans(pattern: re.Pattern[str], text: str) -> list[tuple[int, int]]:
     return [(match.start(), match.end()) for match in pattern.finditer(text)]
 
 
+def _overlaps(span: tuple[int, int], others: list[tuple[int, int]]) -> bool:
+    start, end = span
+    return any(not (end <= other_start or start >= other_end) for other_start, other_end in others)
+
+
 def _negated(text: str, start: int) -> bool:
     window = text[max(0, start - 48) : start]
     return _NEGATION_BEFORE.search(window) is not None
@@ -115,42 +122,68 @@ def _live(text: str, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 def _signals(text: str) -> dict[str, list[tuple[int, int]]]:
     review_log = _spans(_REVIEW_LOG_RE, text)
-    review = []
-    for start, end in _spans(_REVIEW_RE, text):
-        if any(not (end <= log_start or start >= log_end) for log_start, log_end in review_log):
-            continue
-        review.append((start, end))
+    review = [span for span in _spans(_REVIEW_RE, text) if not _overlaps(span, review_log)]
+    implement = _live(text, _spans(_IMPLEMENT_RE, text))
 
     log = []
     for pattern in _LOG_RES:
         log.extend(_spans(pattern, text))
-    if not log and _LOG_WORD.search(text) and _LOG_SIGNAL.search(text):
-        word = _LOG_WORD.search(text)
-        if word:
-            log.append((word.start(), word.end()))
+    log = _live(text, log)
+    if not log:
+        log_words = _live(text, _spans(_LOG_WORD, text))
+        log_errors = [
+            span
+            for span in _live(text, _spans(_LOG_SIGNAL, text))
+            if not _overlaps(span, implement)
+        ]
+        if log_words and log_errors:
+            log.append(log_words[0])
 
     found = {
-        "plan": [span for pattern in _PLAN_RES for span in _spans(pattern, text)],
+        "plan": _live(text, [span for pattern in _PLAN_RES for span in _spans(pattern, text)]),
         "log": log,
-        "implement": _spans(_IMPLEMENT_RE, text),
-        "review": review,
-        "pr": [span for pattern in _PR_RES for span in _spans(pattern, text)],
+        "implement": implement,
+        "review": _live(text, review),
+        "pr": _live(text, [span for pattern in _PR_RES for span in _spans(pattern, text)]),
     }
-    return {name: _live(text, spans) for name, spans in found.items() if _live(text, spans)}
+    return {name: spans for name, spans in found.items() if spans}
 
 
-def _plan_subject_only(text: str, signals: dict[str, list[tuple[int, int]]]) -> bool:
-    """'lên plan để fix bug' asks for a plan whose subject is the fix."""
-    if "plan" not in signals or len(signals) < 2 or _SEQUENCE.search(text):
-        return False
+def _drop_plan_subjects(text: str, signals: dict[str, list[tuple[int, int]]]) -> dict[str, list[tuple[int, int]]]:
+    """Drop spans after 'plan' that are attached with 'để/cho/for/to' and no sequence word."""
+    if "plan" not in signals or len(signals) < 2:
+        return signals
     plan_end = min(end for _, end in signals["plan"])
+    trimmed: dict[str, list[tuple[int, int]]] = {"plan": signals["plan"]}
     for name, spans in signals.items():
         if name == "plan":
             continue
-        for start, _end in spans:
-            if start < plan_end or not _PURPOSE.search(text[plan_end:start]):
-                return False
-    return True
+        kept = []
+        for start, end in spans:
+            between = text[plan_end:start] if start >= plan_end else ""
+            if start >= plan_end and _PURPOSE.search(between) and not _SEQUENCE.search(between):
+                continue
+            kept.append((start, end))
+        if kept:
+            trimmed[name] = kept
+    return trimmed
+
+
+def _ordered_names(signals: dict[str, list[tuple[int, int]]]) -> list[str]:
+    return sorted(
+        signals,
+        key=lambda name: (min(start for start, _ in signals[name]), _SIGNAL_ORDER.index(name)),
+    )
+
+
+def _has_sequence_between(text: str, signals: dict[str, list[tuple[int, int]]], names: list[str]) -> bool:
+    if len(names) < 2:
+        return False
+    first_end = min(end for _, end in signals[names[0]])
+    last_start = max(start for start, _ in signals[names[-1]])
+    if last_start <= first_end:
+        return False
+    return _SEQUENCE.search(text[first_end:last_start]) is not None
 
 
 def _decision(rule: str, tier: str | None, signals: list[str], stages: list[dict] | None) -> dict:
@@ -179,14 +212,12 @@ def _stage_list(names: list[str]) -> list[dict]:
 
 def classify(task: str) -> dict:
     text = fold(task)
-    signals = _signals(text)
-    if _plan_subject_only(text, signals):
-        signals = {"plan": signals["plan"]}
-    names = [name for name in _SIGNAL_ORDER if name in signals]
+    signals = _drop_plan_subjects(text, _signals(text))
+    names = _ordered_names(signals)
 
     if names == ["implement", "review"]:
         return _decision("fix-and-review", "sonnet", names, _stage_list(names))
-    if len(names) > 1 and _SEQUENCE.search(text):
+    if len(names) > 1 and _has_sequence_between(text, signals, names):
         return _decision("split", None, names, _stage_list(names))
     if len(names) > 1:
         return _decision("confirm", None, names, None)
@@ -283,9 +314,12 @@ def _hook_main() -> int:
     except json.JSONDecodeError:
         return 0
     prompt = payload.get("prompt") if isinstance(payload, dict) else None
-    if not isinstance(prompt, str) or not prompt.strip():
+    if not isinstance(prompt, str):
         return 0
-    json.dump(hook_payload(prompt), sys.stdout, ensure_ascii=False)
+    stripped = prompt.strip()
+    if not stripped or stripped.startswith("/") or _EXPLICIT_AGENT.search(stripped):
+        return 0
+    json.dump(hook_payload(stripped), sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0
 

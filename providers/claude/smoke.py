@@ -49,7 +49,10 @@ def evaluate_session(returncode: int, events: list[dict]) -> str | None:
             final = event
         usage = event.get("modelUsage")
         if isinstance(usage, dict):
-            usage_names.extend(str(name) for name in usage)
+            usage_names.extend(str(name).lower() for name in usage)
+        message = event.get("message")
+        if isinstance(message, dict) and event.get("parent_tool_use_id") and message.get("model"):
+            usage_names.append(str(message["model"]).lower())
         for block in _blocks(event):
             if not isinstance(block, dict):
                 continue
@@ -79,7 +82,7 @@ def evaluate_session(returncode: int, events: list[dict]) -> str | None:
         return "Agent tool result reported an error"
 
     model = call["input"].get("model")
-    model_text = model if isinstance(model, str) else ""
+    model_text = model.lower() if isinstance(model, str) else ""
     if EXPECT_MODEL not in model_text and not any(EXPECT_MODEL in name for name in usage_names):
         return "stream does not show that the agent finished on haiku"
     return None
@@ -100,6 +103,8 @@ def main() -> int:
         "--verbose",
         "--permission-mode",
         "dontAsk",
+        "--allowedTools",
+        "Agent",
         "--max-budget-usd",
         "1",
         "--no-session-persistence",

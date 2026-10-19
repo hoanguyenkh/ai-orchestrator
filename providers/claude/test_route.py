@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Lock the routing examples from the orchestrator policy."""
 
+import io
 import json
 import shlex
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from route import classify, hook_payload, install_hook
+from route import classify, hook_payload, install_hook, main as route_main
 from smoke import evaluate_session
 
 
@@ -172,6 +174,47 @@ class RouteTests(unittest.TestCase):
     def test_same_model_split_hook_spawns_haiku_twice(self):
         text = hook_payload("check log rồi make PR")["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(text.count("`tier-haiku`"), 2)
+
+    def test_stages_follow_prompt_order(self):
+        decision = classify("check log rồi lên plan")
+        self.assertEqual(decision["rule"], "split")
+        self.assertEqual(
+            decision["stages"],
+            [
+                {"stage": "log", "agent": "tier-haiku"},
+                {"stage": "plan", "agent": "tier-opus"},
+            ],
+        )
+
+    def test_trailing_and_does_not_turn_ambiguous_plan_into_split(self):
+        decision = classify("lên kế hoạch sửa bug cho service A và service B")
+        self.assertEqual(decision["rule"], "confirm")
+        self.assertIsNone(decision["agent"])
+
+    def test_plan_to_fix_Then_pr_drops_only_the_plan_subject(self):
+        decision = classify("lên plan để fix bug rồi make PR")
+        self.assertEqual(decision["rule"], "split")
+        self.assertEqual(
+            decision["stages"],
+            [
+                {"stage": "plan", "agent": "tier-opus"},
+                {"stage": "pr", "agent": "tier-haiku"},
+            ],
+        )
+
+    def test_fixing_log_code_or_image_tag_code_stays_sonnet(self):
+        for prompt in ("sửa lỗi không ghi log", "fix bug parse sai image tag"):
+            decision = classify(prompt)
+            self.assertEqual(decision["agent"], "tier-sonnet", prompt)
+            self.assertEqual(decision["rule"], "implement", prompt)
+
+    def test_hook_stays_silent_on_slash_commands_and_explicit_mentions(self):
+        for prompt in ("/agents", "@tier-haiku fix this", "@agent-tier-opus check log"):
+            stdin = io.StringIO(json.dumps({"prompt": prompt}))
+            stdout = io.StringIO()
+            with patch("sys.stdin", stdin), patch("sys.stdout", stdout):
+                self.assertEqual(route_main([]), 0)
+            self.assertEqual(stdout.getvalue(), "", prompt)
 
     def test_install_hook_quotes_paths_and_sets_main_model(self):
         with tempfile.TemporaryDirectory() as directory:
