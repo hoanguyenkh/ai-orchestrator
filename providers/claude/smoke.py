@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import sys
 
+from route import load_config
+
 PROMPT = "check log của service demo để xem có bugs ko"
 EXPECT_AGENT = "tier-haiku"
 EXPECT_MODEL = "haiku"
@@ -92,12 +94,13 @@ def main() -> int:
     claude = shutil.which("claude")
     if not claude:
         sys.exit("smoke: `claude` is not on PATH")
+    main_model = load_config()["mainModel"]
 
     command = [
         claude,
         "-p",
         "--model",
-        "sonnet",
+        main_model,
         "--output-format",
         "stream-json",
         "--verbose",
@@ -128,7 +131,7 @@ def main() -> int:
             continue
 
     print(f"prompt: {PROMPT}")
-    print(f"main model requested: sonnet")
+    print(f"main model requested: {main_model}")
     print(f"claude exit: {completed.returncode}")
     blob = completed.stdout + completed.stderr
     if "authentication_error" in blob or "OAuth access token is invalid" in blob:

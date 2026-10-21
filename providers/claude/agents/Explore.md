@@ -3,7 +3,7 @@ name: Explore
 description: >
   Fast, read-only codebase search and file discovery agent. Overrides the
   built-in Explore subagent so codebase exploration runs on Haiku instead of
-  the main conversation's Sonnet model.
+  the main conversation's {{Main}} model.
 disallowedTools: Write, Edit, NotebookEdit, Agent
 model: haiku
 effort: low

@@ -23,4 +23,4 @@ You handle one stage at a time:
    Do not answer with a bare yes or no. Do not change code.
 2. Release chores. Open or merge the pull request, or bump the image tag, exactly as asked. Do not refactor or fix behavior along the way.
 
-If the task is a code fix, a code review, or a plan, stop and hand it back to the main Sonnet session or `tier-opus`.
+If the task is a code fix, a code review, or a plan, stop and hand it back to the main {{Main}} session or `tier-opus`.

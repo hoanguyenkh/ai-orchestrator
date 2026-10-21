@@ -4,7 +4,7 @@ Route each task to the model that fits it. Claude Code is the first provider. Co
 
 ## Claude Code
 
-The main session runs on `sonnet` (`init.sh` sets `"model": "sonnet"` and `"CLAUDE_CODE_SUBAGENT_MODEL": "haiku"` in `~/.claude/settings.json`). To keep latency and token usage low, **Sonnet tasks run directly on the main session** with zero subagent spawn overhead, while **Opus** and **Haiku** stages are delegated to [subagents](https://code.claude.com/docs/en/sub-agents) in `~/.claude/agents/`. Each subagent sets `disallowedTools: Agent` so it cannot spawn nested subagents, while inheriting all other tools including MCP.
+The main session runs on `opus` with `effortLevel` `high`. Those defaults live in [`providers/claude/config.json`](providers/claude/config.json). `init.sh` writes `"model"`, `"effortLevel"`, and `"CLAUDE_CODE_SUBAGENT_MODEL": "haiku"` in `~/.claude/settings.json`. Implementation, review, and other main-session work stay there so the prompt cache is shared. Planning still uses the `tier-opus` subagent, and log/PR work uses Haiku. Each subagent sets `disallowedTools: Agent` so it cannot spawn nested subagents, while inheriting all other tools including MCP.
 
 | Stage | Where it runs | Model |
 | --- | --- | --- |
@@ -12,16 +12,17 @@ The main session runs on `sonnet` (`init.sh` sets `"model": "sonnet"` and `"CLAU
 | Check logs of a service or an agent | `tier-haiku` subagent (`effort: medium`, `omitClaudeMd: true`, `maxTurns: 15`) | `haiku` |
 | Make/merge a PR or bump an image tag | `tier-haiku` subagent (`effort: medium`, `omitClaudeMd: true`, `maxTurns: 15`) | `haiku` |
 | Plan code or plan a feature | `tier-opus` subagent (`effort: high`) | `opus` |
-| Implement, improve, review, re-review, and everything else | **Main session directly** (shared context & prompt cache) | `sonnet` |
+| Implement, improve, review, re-review, and everything else | **Main session directly** (shared context & prompt cache) | `opus` (`effortLevel: high`) |
 
-`haiku`, `sonnet`, and `opus` are aliases for the latest model in that family. A new Sonnet release does not require an edit to the agent files.
+`haiku`, `sonnet`, and `opus` are aliases for the latest model in that family. A new Opus release does not require an edit to the agent files.
 
-When a prompt only asks for Sonnet work (fix, implement, improve, review, re-review), the `UserPromptSubmit` hook stays silent and the main Sonnet session handles it immediately. When a prompt needs Haiku, Opus, or multiple stages, the hook injects a routing hint so the main session delegates the Haiku/Opus stages and keeps the code/review stages on itself.
+When a prompt only asks for main-session work (fix, implement, improve, review, re-review), the `UserPromptSubmit` hook stays silent and the main Opus session handles it immediately. When a prompt needs Haiku, a plan, or multiple stages, the hook injects a routing hint so the main session delegates those stages and keeps the code/review stages on itself.
 
 Install or update (backs up existing files under `~/.claude/orchestrator-backups/<timestamp>/`):
 
 ```bash
-providers/claude/init.sh
+providers/claude/init.sh          # main, code, and review on opus, effort high
+providers/claude/init.sh sonnet   # same routing, main session on sonnet
 ```
 
 `--explain` checks the classifier only:
