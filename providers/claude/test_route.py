@@ -9,7 +9,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from route import classify, hook_payload, install_hook, main as route_main
+from route import (
+    classify,
+    hook_payload,
+    install_hook,
+    load_config,
+    load_config_from,
+    render_text,
+    main as route_main,
+)
 from smoke import evaluate_session
 
 
@@ -29,10 +37,10 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(decision["agent"], "tier-haiku")
         self.assertEqual(decision["rule"], "log-check")
 
-    def test_fix_and_review_stays_on_main_sonnet_session(self):
+    def test_fix_and_review_stays_on_main_opus_session(self):
         decision = classify("Fix và review")
         self.assertEqual(decision["agent"], "main")
-        self.assertEqual(decision["model"], "sonnet")
+        self.assertEqual(decision["model"], "opus")
         self.assertEqual(decision["rule"], "fix-and-review")
         self.assertEqual(
             decision["stages"],
@@ -53,10 +61,10 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(decision["agent"], "tier-opus")
         self.assertEqual(decision["rule"], "plan")
 
-    def test_negated_plan_then_fix_is_main_sonnet(self):
+    def test_negated_plan_then_fix_is_main_opus(self):
         decision = classify("không cần lên plan, fix bug này")
         self.assertEqual(decision["agent"], "main")
-        self.assertEqual(decision["model"], "sonnet")
+        self.assertEqual(decision["model"], "opus")
         self.assertEqual(decision["rule"], "implement")
         self.assertNotIn("plan", decision["signals"])
         self.assertIsNone(hook_payload("không cần lên plan, fix bug này"))
@@ -113,18 +121,18 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(decision["agent"], "tier-haiku")
         self.assertEqual(decision["rule"], "pr-or-bump")
 
-    def test_improve_and_implement_stay_on_main_sonnet(self):
+    def test_improve_and_implement_stay_on_main_opus(self):
         for prompt in ("improve the retry handler", "implement pagination"):
             decision = classify(prompt)
             self.assertEqual(decision["agent"], "main", prompt)
-            self.assertEqual(decision["model"], "sonnet", prompt)
+            self.assertEqual(decision["model"], "opus", prompt)
             self.assertEqual(decision["rule"], "implement", prompt)
             self.assertIsNone(hook_payload(prompt))
 
-    def test_review_code_stays_on_main_sonnet(self):
+    def test_review_code_stays_on_main_opus(self):
         decision = classify("review code của service payment")
         self.assertEqual(decision["agent"], "main")
-        self.assertEqual(decision["model"], "sonnet")
+        self.assertEqual(decision["model"], "opus")
         self.assertEqual(decision["rule"], "review")
         self.assertIsNone(hook_payload("review code của service payment"))
 
@@ -157,10 +165,10 @@ class RouteTests(unittest.TestCase):
         self.assertIn("maxTurns: 15\n", haiku_text)
         self.assertIn("omitClaudeMd: true\n", haiku_text)
 
-    def test_other_stays_on_main_sonnet(self):
+    def test_other_stays_on_main_opus(self):
         decision = classify("thêm pagination cho orders endpoint")
         self.assertEqual(decision["agent"], "main")
-        self.assertEqual(decision["model"], "sonnet")
+        self.assertEqual(decision["model"], "opus")
         self.assertEqual(decision["rule"], "default")
         self.assertIsNone(hook_payload("thêm pagination cho orders endpoint"))
 
@@ -170,9 +178,10 @@ class RouteTests(unittest.TestCase):
         self.assertIsNone(decision["agent"])
         self.assertEqual(decision["signals"], ["implement", "pr"])
 
-    def test_review_pr_stays_on_main_sonnet(self):
+    def test_review_pr_stays_on_main_opus(self):
         decision = classify("review the pull request")
         self.assertEqual(decision["agent"], "main")
+        self.assertEqual(decision["model"], "opus")
         self.assertEqual(decision["rule"], "review")
 
     def test_log_then_fix_is_split(self):
@@ -184,7 +193,7 @@ class RouteTests(unittest.TestCase):
     def test_split_hook_lists_each_stage(self):
         text = hook_payload("lên plan rồi implement và make PR")["hookSpecificOutput"]["additionalContext"]
         self.assertIn("- plan -> `tier-opus`", text)
-        self.assertIn("- implement -> handle directly on the main Sonnet session", text)
+        self.assertIn("- implement -> handle directly on the main Opus session", text)
         self.assertIn("- pr -> `tier-haiku`", text)
 
     def test_same_model_split_hook_spawns_haiku_twice(self):
@@ -219,7 +228,7 @@ class RouteTests(unittest.TestCase):
             ],
         )
 
-    def test_fixing_log_code_or_image_tag_code_stays_sonnet(self):
+    def test_fixing_log_code_or_image_tag_code_stays_on_main(self):
         for prompt in ("sửa lỗi không ghi log", "fix bug parse sai image tag"):
             decision = classify(prompt)
             self.assertEqual(decision["agent"], "main", prompt)
@@ -240,9 +249,9 @@ class RouteTests(unittest.TestCase):
         )
         text = hook_payload(prompt)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Respect conditional gates", text)
-        self.assertIn("directly on the main Sonnet session", text)
+        self.assertIn("directly on the main Opus session", text)
 
-    def test_hook_stays_silent_on_slash_commands_mentions_and_pure_sonnet(self):
+    def test_hook_stays_silent_on_slash_commands_mentions_and_pure_main_work(self):
         for prompt in ("/agents", "@tier-haiku fix this", "@agent-tier-opus check log", "Fix và review"):
             stdin = io.StringIO(json.dumps({"prompt": prompt}))
             stdout = io.StringIO()
@@ -261,13 +270,79 @@ class RouteTests(unittest.TestCase):
             command = saved["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
             self.assertEqual(command, shlex.quote(str(script)))
             self.assertTrue(command.startswith("'"))
-            self.assertEqual(saved["model"], "sonnet")
+            self.assertEqual(saved["model"], "opus")
+            self.assertEqual(saved["effortLevel"], "high")
             self.assertEqual(saved["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "haiku")
+            orch = json.loads((root / "orchestrator.json").read_text(encoding="utf-8"))
+            self.assertEqual(orch["mainModel"], "opus")
+            self.assertEqual(orch["mainEffort"], "high")
             self.assertEqual(saved["attribution"]["commit"], "")
             install_hook(settings, script)
             again = json.loads(settings.read_text(encoding="utf-8"))
             self.assertEqual(len(again["hooks"]["UserPromptSubmit"]), 1)
             self.assertEqual(len(again["hooks"]["UserPromptSubmit"][0]["hooks"]), 1)
+
+    def test_config_defaults_to_opus_high(self):
+        cfg = load_config()
+        self.assertEqual(cfg["mainModel"], "opus")
+        self.assertEqual(cfg["mainEffort"], "high")
+        self.assertEqual(cfg["subagentModel"], "haiku")
+
+    def test_install_hook_can_pin_sonnet(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = root / "settings.json"
+            settings.write_text("{}\n", encoding="utf-8")
+            install_hook(settings, root / "hook.py", main_model="sonnet")
+            saved = json.loads(settings.read_text(encoding="utf-8"))
+            self.assertEqual(saved["model"], "sonnet")
+            self.assertEqual(saved["effortLevel"], "high")
+            orch = json.loads((root / "orchestrator.json").read_text(encoding="utf-8"))
+            self.assertEqual(orch["mainModel"], "sonnet")
+
+    def test_install_hook_rejects_an_unknown_main_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = root / "settings.json"
+            settings.write_text("{}\n", encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                install_hook(settings, root / "hook.py", main_model="haiku")
+
+    def test_live_settings_can_select_sonnet(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "orchestrator.json"
+            config.write_text(
+                json.dumps({"mainModel": "opus", "mainEffort": "high", "subagentModel": "haiku"}),
+                encoding="utf-8",
+            )
+            settings = root / "settings.json"
+            settings.write_text(json.dumps({"model": "sonnet", "effortLevel": "low"}), encoding="utf-8")
+            cfg = load_config_from(config, settings, settings_override=True)
+            self.assertEqual(cfg["mainModel"], "sonnet")
+            self.assertEqual(cfg["mainEffort"], "low")
+            self.assertEqual(cfg["subagentModel"], "haiku")
+
+    def test_skill_renders_for_opus_and_sonnet(self):
+        raw = (Path(__file__).resolve().parent / "skill" / "SKILL.md").read_text(encoding="utf-8")
+        opus = render_text(raw, "opus", "high")
+        sonnet = render_text(raw, "sonnet", "high")
+        self.assertIn("main Opus session", opus)
+        self.assertIn('"model": "opus"', opus)
+        self.assertIn("`tier-opus`", opus)
+        self.assertNotIn("{{", opus)
+        self.assertIn("main Sonnet session", sonnet)
+        self.assertIn("`tier-opus`", sonnet)
+        self.assertNotIn("tier-sonnet", sonnet)
+        self.assertNotIn("{{", sonnet)
+
+    def test_agent_templates_render_the_main_model(self):
+        root = Path(__file__).resolve().parent / "agents"
+        for name in ("tier-opus.md", "tier-haiku.md", "Explore.md"):
+            rendered = render_text((root / name).read_text(encoding="utf-8"), "opus", "high")
+            self.assertNotIn("{{", rendered)
+            self.assertIn("Opus", rendered)
+            self.assertNotIn("Sonnet", rendered)
 
 
 def _agent_call(model="haiku"):

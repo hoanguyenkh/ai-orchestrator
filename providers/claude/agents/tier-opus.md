@@ -15,4 +15,4 @@ Write the plan. Do not implement it.
 
 Include the goal, the constraints you can see, the approach and the tradeoff that decided it, files to touch, tests, and risks you did not check.
 
-If the delegation also asks you to implement, review, check logs, or open a PR, write only the plan and say that the main Sonnet session (for implementation/review) or `tier-haiku` (for logs/PR/tag bump) should handle the remaining stages.
+If the delegation also asks you to implement, review, check logs, or open a PR, write only the plan and say that the main {{Main}} session (for implementation/review) or `tier-haiku` (for logs/PR/tag bump) should handle the remaining stages.

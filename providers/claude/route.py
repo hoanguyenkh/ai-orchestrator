@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Route a Claude Code prompt across the main Sonnet session and subagents.
+"""Route a Claude Code prompt across the main session and subagents.
 
-The main session already runs on Sonnet, so implementation, improvement, code
-review, and re-review stay directly on the main session in one shared context
-with zero subagent spawn overhead. Subagents are only spawned when switching
-models or isolating noisy mechanical work:
-  - plan            -> tier-opus (opus)
+The main session model comes from config.json. The default is Opus at high
+effort. `init.sh sonnet` installs Sonnet instead. Implementation, code review,
+and re-review stay on that main session in one shared context. Subagents are
+only spawned for a different role:
+  - plan            -> tier-opus (opus, effort high)
   - log check       -> tier-haiku (haiku)
   - PR / bump tag   -> tier-haiku (haiku)
-  - implement/review/default -> main session (sonnet)
+  - implement/review/default -> main session (config mainModel)
 """
 
 from __future__ import annotations
@@ -20,11 +20,99 @@ import sys
 import unicodedata
 from pathlib import Path
 
-AGENTS = {
-    "haiku": "tier-haiku",
-    "sonnet": "main",
-    "opus": "tier-opus",
+DEFAULT_CONFIG = {
+    "mainModel": "opus",
+    "mainEffort": "high",
+    "subagentModel": "haiku",
 }
+ALLOWED_MAIN_MODELS = {"opus", "sonnet"}
+ALLOWED_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+ALLOWED_SUBAGENT_MODELS = {"haiku", "sonnet", "opus"}
+_LABELS = {"opus": "Opus", "sonnet": "Sonnet", "haiku": "Haiku"}
+
+
+def _validate_config(data: dict, *, strict: bool) -> dict:
+    if data["mainModel"] not in ALLOWED_MAIN_MODELS:
+        if strict:
+            raise SystemExit("mainModel must be opus or sonnet")
+        data["mainModel"] = DEFAULT_CONFIG["mainModel"]
+    if data["mainEffort"] not in ALLOWED_EFFORTS:
+        if strict:
+            raise SystemExit("mainEffort must be low, medium, high, xhigh, or max")
+        data["mainEffort"] = DEFAULT_CONFIG["mainEffort"]
+    if data["subagentModel"] not in ALLOWED_SUBAGENT_MODELS:
+        if strict:
+            raise SystemExit("subagentModel must be haiku, sonnet, or opus")
+        data["subagentModel"] = DEFAULT_CONFIG["subagentModel"]
+    return data
+
+
+def load_config_from(
+    config_path: Path | None,
+    settings_path: Path | None = None,
+    *,
+    strict: bool = False,
+    settings_override: bool = False,
+) -> dict:
+    """Merge config.json with an optional live settings.json model."""
+    data = dict(DEFAULT_CONFIG)
+    if config_path is not None and config_path.is_file():
+        raw = json.loads(config_path.read_text(encoding="utf-8") or "{}")
+        if not isinstance(raw, dict):
+            if strict:
+                raise SystemExit(f"invalid config: {config_path}")
+        else:
+            for key in DEFAULT_CONFIG:
+                if isinstance(raw.get(key), str):
+                    data[key] = raw[key]
+    if settings_override and settings_path is not None and settings_path.is_file():
+        raw = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
+        if isinstance(raw, dict):
+            model = raw.get("model")
+            effort = raw.get("effortLevel")
+            if isinstance(model, str) and model in ALLOWED_MAIN_MODELS:
+                data["mainModel"] = model
+            if isinstance(effort, str) and effort in ALLOWED_EFFORTS:
+                data["mainEffort"] = effort
+    return _validate_config(data, strict=strict)
+
+
+def load_config(*, strict: bool = False) -> dict:
+    """Repo runs read config.json. The installed hook follows settings.json."""
+    here = Path(__file__).resolve().parent
+    local = here / "config.json"
+    if local.is_file():
+        return load_config_from(local, strict=strict)
+    parent = here.parent
+    installed = parent / "orchestrator.json"
+    settings = parent / "settings.json"
+    return load_config_from(
+        installed if installed.is_file() else None,
+        settings if settings.is_file() else None,
+        strict=strict,
+        settings_override=True,
+    )
+
+
+def resolve_install_config(main_model: str | None = None, main_effort: str | None = None) -> dict:
+    data = load_config(strict=True)
+    if main_model:
+        data["mainModel"] = main_model
+    if main_effort:
+        data["mainEffort"] = main_effort
+    return _validate_config(data, strict=True)
+
+
+def model_label(model: str) -> str:
+    return _LABELS.get(model, model)
+
+
+def render_text(text: str, main_model: str, main_effort: str) -> str:
+    return (
+        text.replace("{{main_model}}", main_model)
+        .replace("{{main_effort}}", main_effort)
+        .replace("{{Main}}", model_label(main_model))
+    )
 
 _SIGNAL_ORDER = ("plan", "log", "implement", "review", "pr")
 
@@ -80,11 +168,13 @@ _NEGATION_BEFORE = re.compile(
 )
 _EXPLICIT_AGENT = re.compile(r"@(?:\"|\b)(?:agent-)?(?:tier-(?:haiku|opus)|explore)\b", re.IGNORECASE)
 
-_STAGE_TABLE = """\
-- planning -> `tier-opus` subagent
-- log triage -> `tier-haiku` subagent
-- implementation, review, and re-review -> directly on the main Sonnet session (do NOT spawn a subagent)
-- PR, merge, and image-tag bump -> `tier-haiku` subagent"""
+def _stage_table(label: str) -> str:
+    return (
+        "- planning -> `tier-opus` subagent\n"
+        "- log triage -> `tier-haiku` subagent\n"
+        f"- implementation, review, and re-review -> directly on the main {label} session (do NOT spawn a subagent)\n"
+        "- PR, merge, and image-tag bump -> `tier-haiku` subagent"
+    )
 
 
 def fold(text: str) -> str:
@@ -178,11 +268,17 @@ def _has_sequence_between(text: str, signals: dict[str, list[tuple[int, int]]], 
     return _SEQUENCE.search(text[first_end:last_start]) is not None
 
 
-def _decision(rule: str, tier: str | None, signals: list[str], stages: list[dict] | None) -> dict:
+def _decision(
+    rule: str,
+    model: str | None,
+    signals: list[str],
+    stages: list[dict] | None,
+    agent: str | None,
+) -> dict:
     return {
-        "tier": tier,
-        "agent": AGENTS[tier] if tier else None,
-        "model": tier,
+        "tier": model,
+        "agent": agent,
+        "model": model,
         "rule": rule,
         "signals": signals,
         "stages": stages,
@@ -206,41 +302,43 @@ def classify(task: str) -> dict:
     text = fold(task)
     signals = _drop_plan_subjects(text, _signals(text))
     names = _ordered_names(signals)
+    main = load_config()["mainModel"]
 
     if set(names) and set(names).issubset({"implement", "review"}):
         rule = "fix-and-review" if len(names) == 2 else names[0]
-        return _decision(rule, "sonnet", names, _stage_list(names))
+        return _decision(rule, main, names, _stage_list(names), "main")
     if len(names) > 1 and _has_sequence_between(text, signals, names):
-        return _decision("split", None, names, _stage_list(names))
+        return _decision("split", None, names, _stage_list(names), None)
     if len(names) > 1:
-        return _decision("confirm", None, names, None)
+        return _decision("confirm", None, names, None, None)
     if names == ["plan"]:
-        return _decision("plan", "opus", names, [{"stage": "plan", "agent": "tier-opus"}])
+        return _decision("plan", "opus", names, [{"stage": "plan", "agent": "tier-opus"}], "tier-opus")
     if names == ["log"]:
-        return _decision("log-check", "haiku", names, [{"stage": "log", "agent": "tier-haiku"}])
+        return _decision("log-check", "haiku", names, [{"stage": "log", "agent": "tier-haiku"}], "tier-haiku")
     if names == ["pr"]:
-        return _decision("pr-or-bump", "haiku", names, [{"stage": "pr", "agent": "tier-haiku"}])
-    return _decision("default", "sonnet", names, [{"stage": "default", "agent": "main"}])
+        return _decision("pr-or-bump", "haiku", names, [{"stage": "pr", "agent": "tier-haiku"}], "tier-haiku")
+    return _decision("default", main, names, [{"stage": "default", "agent": "main"}], "main")
 
 
-def _format_stage(stage: dict) -> str:
+def _format_stage(stage: dict, label: str) -> str:
     if stage["agent"] == "main":
-        return f"- {stage['stage']} -> handle directly on the main Sonnet session (do NOT spawn a subagent)"
+        return f"- {stage['stage']} -> handle directly on the main {label} session (do NOT spawn a subagent)"
     return f"- {stage['stage']} -> `{stage['agent']}`"
 
 
 def hook_payload(task: str) -> dict | None:
     decision = classify(task)
     if decision["agent"] == "main":
-        # Main session is already Sonnet: do not inject extra prompt tokens or spawn a subagent.
+        # The main session is already the configured model. Do not inject extra tokens.
         return None
+    label = model_label(load_config()["mainModel"])
     if decision["rule"] == "split":
-        lines = "\n".join(_format_stage(stage) for stage in decision["stages"])
+        lines = "\n".join(_format_stage(stage, label) for stage in decision["stages"])
         context = (
             "Orchestrator hint only. Run each stage in order:\n"
             f"{lines}\n"
-            "Do `implement`, `review`, and any re-review directly on the main Sonnet session in this same context "
-            "instead of spawning `tier-sonnet`. Only spawn subagents for `tier-opus` and `tier-haiku` stages. "
+            f"Do `implement`, `review`, and any re-review directly on the main {label} session in this same context "
+            "instead of spawning a subagent. Only spawn subagents for `tier-opus` and `tier-haiku` stages. "
             "Respect conditional gates in the prompt (e.g., 'nếu có issues', 'ok thì'): if log triage finds no evidence of errors, stop there; "
             "if review finds issues, fix and re-review on the main session before moving to the release stage. "
             "An explicit @-mention overrides this hint."
@@ -253,7 +351,7 @@ def hook_payload(task: str) -> dict | None:
             "Do not add an implement, review, log, or PR stage unless they asked for that work to be carried out. "
             "If they only want a plan, delegate only that stage to `tier-opus`. "
             "If they want several stages:\n"
-            f"{_STAGE_TABLE}\n"
+            f"{_stage_table(label)}\n"
             "An explicit @-mention overrides this hint."
         )
     else:
@@ -270,13 +368,20 @@ def hook_payload(task: str) -> dict | None:
     }
 
 
-def install_hook(settings_path: Path, script_path: Path) -> None:
+def install_hook(
+    settings_path: Path,
+    script_path: Path,
+    main_model: str | None = None,
+    main_effort: str | None = None,
+) -> dict:
+    cfg = resolve_install_config(main_model, main_effort)
     settings: dict = {}
     if settings_path.exists():
         settings = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
-    settings["model"] = "sonnet"
+    settings["model"] = cfg["mainModel"]
+    settings["effortLevel"] = cfg["mainEffort"]
     env = settings.setdefault("env", {})
-    env["CLAUDE_CODE_SUBAGENT_MODEL"] = "haiku"
+    env["CLAUDE_CODE_SUBAGENT_MODEL"] = cfg["subagentModel"]
     hooks = settings.setdefault("hooks", {})
     groups = hooks.setdefault("UserPromptSubmit", [])
     entry = {"type": "command", "command": shlex.quote(str(script_path)), "timeout": 10}
@@ -294,6 +399,9 @@ def install_hook(settings_path: Path, script_path: Path) -> None:
         groups.append({"hooks": [entry]})
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    orch_path = settings_path.parent / "orchestrator.json"
+    orch_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    return cfg
 
 
 def _read_stdin() -> str:
@@ -324,14 +432,40 @@ def _hook_main() -> int:
     return 0
 
 
+def _pop_option(args: list[str], name: str) -> str | None:
+    if name not in args:
+        return None
+    index = args.index(name)
+    if index + 1 >= len(args):
+        sys.exit(f"usage: {name} VALUE")
+    value = args[index + 1]
+    del args[index : index + 2]
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    main_model = _pop_option(args, "--main-model")
+    main_effort = _pop_option(args, "--main-effort")
     if not args:
         return _hook_main()
+    if args[0] == "--print-config":
+        cfg = resolve_install_config(main_model, main_effort)
+        print(f"{cfg['mainModel']} {cfg['mainEffort']} {cfg['subagentModel']}")
+        return 0
+    if args[0] == "--render":
+        if len(args) != 3:
+            sys.exit("usage: route.py --render SRC DEST [--main-model opus|sonnet]")
+        cfg = resolve_install_config(main_model, main_effort)
+        dest = Path(args[2])
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        rendered = render_text(Path(args[1]).read_text(encoding="utf-8"), cfg["mainModel"], cfg["mainEffort"])
+        dest.write_text(rendered, encoding="utf-8")
+        return 0
     if args[0] == "--install-hook":
         if len(args) != 3:
-            sys.exit("usage: route.py --install-hook SETTINGS.json SCRIPT")
-        install_hook(Path(args[1]), Path(args[2]))
+            sys.exit("usage: route.py --install-hook SETTINGS.json SCRIPT [--main-model opus|sonnet]")
+        install_hook(Path(args[1]), Path(args[2]), main_model, main_effort)
         return 0
     if args[0] == "--explain":
         task = " ".join(args[1:]).strip() or _read_stdin().strip()
@@ -345,8 +479,12 @@ def main(argv: list[str] | None = None) -> int:
             "usage:\n"
             "  route.py --explain PROMPT    # classifier only; does not run a model\n"
             "  route.py                     # Claude Code UserPromptSubmit hook\n"
-            "  route.py --install-hook SETTINGS.json SCRIPT\n"
-            "  smoke.py                     # real Claude Code session; checks the agent that ran",
+            "  route.py --install-hook SETTINGS.json SCRIPT [--main-model opus|sonnet]\n"
+            "  route.py --print-config [--main-model opus|sonnet]\n"
+            "  smoke.py                     # real Claude Code session; checks the agent that ran\n"
+            "\n"
+            "Main session defaults are providers/claude/config.json (opus, effort high).\n"
+            "init.sh sonnet installs Sonnet instead.",
             file=sys.stderr,
         )
         return 0

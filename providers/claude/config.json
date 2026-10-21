@@ -1,0 +1,5 @@
+{
+  "mainModel": "opus",
+  "mainEffort": "high",
+  "subagentModel": "haiku"
+}
