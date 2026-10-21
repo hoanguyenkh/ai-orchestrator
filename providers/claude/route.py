@@ -6,7 +6,7 @@ effort. `init.sh sonnet` installs Sonnet instead. Implementation, code review,
 and re-review stay on that main session in one shared context. Subagents are
 only spawned for a different role:
   - plan            -> tier-opus (opus, effort high)
-  - log check       -> tier-haiku (haiku)
+  - log fetch       -> tier-haiku (haiku); main session analyzes and decides
   - PR / bump tag   -> tier-haiku (haiku)
   - implement/review/default -> main session (config mainModel)
 """
@@ -171,7 +171,7 @@ _EXPLICIT_AGENT = re.compile(r"@(?:\"|\b)(?:agent-)?(?:tier-(?:haiku|opus)|explo
 def _stage_table(label: str) -> str:
     return (
         "- planning -> `tier-opus` subagent\n"
-        "- log triage -> `tier-haiku` subagent\n"
+        f"- log fetch -> `tier-haiku` returns the lines only; the main {label} session analyzes them and decides\n"
         f"- implementation, review, and re-review -> directly on the main {label} session (do NOT spawn a subagent)\n"
         "- PR, merge, and image-tag bump -> `tier-haiku` subagent"
     )
@@ -321,6 +321,11 @@ def classify(task: str) -> dict:
 
 
 def _format_stage(stage: dict, label: str) -> str:
+    if stage["stage"] == "log":
+        return (
+            "- log -> `tier-haiku` returns the log lines only; "
+            f"analyze them and decide whether to continue on the main {label} session"
+        )
     if stage["agent"] == "main":
         return f"- {stage['stage']} -> handle directly on the main {label} session (do NOT spawn a subagent)"
     return f"- {stage['stage']} -> `{stage['agent']}`"
@@ -334,13 +339,28 @@ def hook_payload(task: str) -> dict | None:
     label = model_label(load_config()["mainModel"])
     if decision["rule"] == "split":
         lines = "\n".join(_format_stage(stage, label) for stage in decision["stages"])
+        log_decision = ""
+        if any(stage["stage"] == "log" for stage in decision["stages"]):
+            log_decision = (
+                f"`tier-haiku` only fetches log lines. The main {label} session analyzes those lines and decides whether there is an error. "
+                "If that analysis finds no error, stop there. "
+            )
         context = (
             "Orchestrator hint only. Run each stage in order:\n"
             f"{lines}\n"
             f"Do `implement`, `review`, and any re-review directly on the main {label} session in this same context "
             "instead of spawning a subagent. Only spawn subagents for `tier-opus` and `tier-haiku` stages. "
-            "Respect conditional gates in the prompt (e.g., 'nếu có issues', 'ok thì'): if log triage finds no evidence of errors, stop there; "
-            "if review finds issues, fix and re-review on the main session before moving to the release stage. "
+            f"{log_decision}"
+            "Respect conditional gates in the prompt (e.g., 'nếu có issues', 'ok thì'). "
+            "If review finds issues, fix and re-review on the main session before moving to the release stage. "
+            "An explicit @-mention overrides this hint."
+        )
+    elif decision["rule"] == "log-check":
+        context = (
+            "Orchestrator hint only. This looks like one log-check stage. "
+            "Spawn `tier-haiku` (model: haiku) only to fetch the log lines. "
+            f"Analyze those lines and decide what they mean on the main {label} session. "
+            "Do not leave the conclusion to the subagent. "
             "An explicit @-mention overrides this hint."
         )
     elif decision["rule"] == "confirm":

@@ -146,6 +146,26 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(decision["agent"], "tier-haiku")
         self.assertEqual(decision["rule"], "log-check")
 
+    def test_log_check_hook_leaves_analysis_on_main(self):
+        text = hook_payload("check log của service xxx để xem có bugs ko")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Spawn `tier-haiku` (model: haiku) only to fetch the log lines.", text)
+        self.assertIn("decide what they mean on the main Opus session", text)
+        self.assertIn("Do not leave the conclusion to the subagent.", text)
+
+    def test_log_then_fix_hook_leaves_analysis_on_main(self):
+        text = hook_payload("check log rồi sửa bug trong handler")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("`tier-haiku` returns the log lines only", text)
+        self.assertIn("analyze them and decide whether to continue on the main Opus session", text)
+        self.assertIn("If that analysis finds no error, stop there.", text)
+
+    def test_haiku_agent_fetches_logs_without_a_verdict(self):
+        text = (Path(__file__).resolve().parent / "agents" / "tier-haiku.md").read_text(encoding="utf-8")
+        self.assertIn("Log fetch.", text)
+        self.assertIn("Do not label them as an error", text)
+        self.assertNotIn("có bằng chứng lỗi", text)
+        self.assertNotIn("chưa thấy lỗi", text)
+        self.assertNotIn("chưa đủ dữ liệu", text)
+
     def test_agent_files_use_latest_aliases_and_fast_haiku_settings(self):
         root = Path(__file__).resolve().parent / "agents"
         expected = {
