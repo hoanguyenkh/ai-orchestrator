@@ -4,23 +4,24 @@ Route each task to the model that fits it. Claude Code is the first provider. Co
 
 ## Claude Code
 
-The main session runs on `opus` with `effortLevel` `high`. Those defaults live in [`providers/claude/config.json`](providers/claude/config.json). `init.sh` writes `"model"`, `"effortLevel"`, and `"CLAUDE_CODE_SUBAGENT_MODEL": "haiku"` in `~/.claude/settings.json`. Implementation, review, and the pull request stay on that session so the prompt cache is shared. Planning still uses the `tier-opus` subagent. `tier-haiku` fetches logs through MCP and cannot use Bash or file tools. `tier-haiku-release` creates the git commit and bumps an image tag. The main session writes the commit message, then opens the pull request after that commit. If the prompt asks to merge, the main session merges after the pull request is open. `Explore` is limited to `Glob`, `Grep`, and `Read`. Each subagent sets `disallowedTools` so it cannot spawn nested subagents.
+The main session runs on `opus` with `effortLevel` `high`. Those defaults live in [`providers/claude/config.json`](providers/claude/config.json). `init.sh` writes `"model"`, `"effortLevel"`, and `"CLAUDE_CODE_SUBAGENT_MODEL": "haiku"` in `~/.claude/settings.json`. Implementation, review, and the judgement calls stay on that session so the prompt cache is shared. Planning still uses the `tier-opus` subagent. `tier-haiku` fetches logs and returns the lines only; it cannot write files. `tier-haiku-release` commits the named paths, pushes, and opens the pull request as one stage, and bumps an image tag; the main session writes the commit message and the pull request title and body. A commit-only request stops after the commit: it does not push and does not open a pull request. It merges only when the prompt asks to merge. `Explore` is limited to `Glob`, `Grep`, and `Read`. Each subagent sets `disallowedTools` so it cannot spawn nested subagents.
 
 | Stage | Where it runs | Model |
 | --- | --- | --- |
 | Built-in codebase search (`Explore`) | `Explore` override (`tools: Glob, Grep, Read`, `effort: medium`, `omitClaudeMd: true`) | `haiku` |
-| Fetch logs of a service or an agent | `tier-haiku` subagent through MCP. Bash and file tools are denied (`effort: medium`, `omitClaudeMd: true`, `maxTurns: 15`) | `haiku` |
+| Fetch logs of a service or an agent | `tier-haiku` subagent (MCP, Bash, or `Read`/`Grep`; write tools denied, `effort: medium`, `omitClaudeMd: true`, `maxTurns: 15`) | `haiku` |
 | Analyze those logs and decide the next step | **Main session directly** | `opus` (`effortLevel: high`) |
 | Implement, improve, review, re-review | **Main session directly** (shared context & prompt cache). A loose "review & fix" runs the fix first | `opus` (`effortLevel: high`) |
-| Git commit the reviewed changes | `tier-haiku-release` subagent, before the pull request. The main session writes the message | `haiku` |
-| Make a PR, and merge when the prompt asks | **Main session directly**, after the commit, and after review and the fix are OK | `opus` (`effortLevel: high`) |
-| Bump an image tag | `tier-haiku-release` subagent (`effort: medium`, `omitClaudeMd: true`, `maxTurns: 15`) | `haiku` |
+| Commit, push, and make the PR | `tier-haiku-release` subagent as one stage, after review and the fix are OK. The main session writes the message, title, and body | `haiku` |
+| Commit on its own | `tier-haiku-release`, which stops after the commit: no push, no pull request | `haiku` |
+| Merge | `tier-haiku-release`, only when the prompt explicitly asks to merge something | `haiku` |
+| Bump an image tag | `tier-haiku-release` subagent (`tools: Bash, Glob, Grep, Read, Edit`, `effort: medium`, `maxTurns: 25`) | `haiku` |
 | Plan code or plan a feature | `tier-opus` subagent (`effort: high`) | `opus` |
 | Everything else | **Main session directly** | `opus` (`effortLevel: high`) |
 
 `haiku`, `sonnet`, and `opus` are aliases for the latest model in that family. A new Opus release does not require an edit to the agent files.
 
-When a prompt only asks for main-session work (fix, implement, improve, review, re-review, or make a PR), the `UserPromptSubmit` hook stays silent and the main Opus session handles it immediately. When a prompt needs Haiku, a plan, or multiple stages, the hook injects a routing hint so the main session delegates those stages and keeps the code, review, and pull request on itself.
+When a prompt only asks for main-session work (fix, implement, improve, review, re-review), the `UserPromptSubmit` hook stays silent and the main Opus session handles it immediately. When a prompt needs Haiku, a plan, or multiple stages, the hook injects a routing hint so the main session delegates those stages and keeps the code and the review on itself.
 
 Install or update (backs up existing files under `~/.claude/orchestrator-backups/<timestamp>/`):
 

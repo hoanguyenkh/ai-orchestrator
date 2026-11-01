@@ -79,12 +79,11 @@ class RouteTests(unittest.TestCase):
             [
                 {"stage": "plan", "agent": "tier-opus"},
                 {"stage": "implement", "agent": "main"},
-                {"stage": "commit", "agent": "tier-haiku-release"},
-                {"stage": "pr", "agent": "main"},
+                {"stage": "pr", "agent": "tier-haiku-release"},
             ],
         )
 
-    def test_log_then_pr_keeps_the_pr_on_main(self):
+    def test_log_then_pr_is_two_haiku_stages(self):
         decision = classify("check log rồi make PR")
         self.assertEqual(decision["rule"], "split")
         self.assertIsNone(decision["agent"])
@@ -92,7 +91,7 @@ class RouteTests(unittest.TestCase):
             decision["stages"],
             [
                 {"stage": "log", "agent": "tier-haiku"},
-                {"stage": "pr", "agent": "main"},
+                {"stage": "pr", "agent": "tier-haiku-release"},
             ],
         )
 
@@ -117,14 +116,14 @@ class RouteTests(unittest.TestCase):
         self.assertIn("Decide the user's intent before acting", text)
         self.assertIn("Do not add an implement", text)
 
-    def test_make_pr_and_bump_tag_splits_pr_onto_main(self):
+    def test_make_pr_and_bump_tag_is_two_release_stages(self):
         decision = classify("Make Pr & bump image tag")
         self.assertEqual(decision["rule"], "split")
         self.assertIsNone(decision["agent"])
         self.assertEqual(
             decision["stages"],
             [
-                {"stage": "pr", "agent": "main"},
+                {"stage": "pr", "agent": "tier-haiku-release"},
                 {"stage": "bump", "agent": "tier-haiku-release"},
             ],
         )
@@ -147,19 +146,57 @@ class RouteTests(unittest.TestCase):
         self.assertNotIn("commit", decision["signals"])
         self.assertEqual(decision["agent"], "main")
 
-    def test_make_pr_stays_on_main(self):
+    def test_make_pr_is_one_release_stage_with_the_push(self):
         decision = classify("make a PR")
-        self.assertEqual(decision["agent"], "main")
+        self.assertEqual(decision["agent"], "tier-haiku-release")
         self.assertEqual(decision["rule"], "pr")
         text = hook_payload("make a PR")["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("Do not create the git commit on the main session.", text)
-        self.assertIn("`tier-haiku-release` to commit the reviewed paths first", text)
+        self.assertIn("commits, pushes, and opens the pull request in one stage", text)
+        self.assertIn("never lands without the push that the pull request needs", text)
         self.assertNotIn("The prompt asks to merge.", text)
+        self.assertIn("The prompt does not ask to merge, so do not merge.", text)
 
-    def test_make_pr_and_merge_keeps_merge_on_main(self):
+    def test_make_pr_and_merge_keeps_the_merge_on_the_release_stage(self):
         text = hook_payload("make PR & merge to main")["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("open the pull request on the main Opus session", text)
+        self.assertIn("- pr -> `tier-haiku-release`", text)
         self.assertIn("The prompt asks to merge.", text)
+        self.assertIn("`tier-haiku-release` merges after the pull request is open.", text)
+
+    def test_a_bare_merge_word_is_not_a_merge_request(self):
+        for prompt in (
+            "fix the merge conflict then make a PR",
+            "resolve merge conflicts rồi make pr",
+            "xem lại merge strategy rồi make pr",
+            "make a PR, do not merge",
+            "make a PR, đừng merge",
+            "make a PR, không merge nhé",
+            "make a PR without merging",
+        ):
+            text = hook_payload(prompt)["hookSpecificOutput"]["additionalContext"]
+            self.assertNotIn("The prompt asks to merge.", text, prompt)
+            self.assertIn("so do not merge", text, prompt)
+
+    def test_an_explicit_merge_request_is_still_seen(self):
+        for prompt in ("make PR & merge to main", "make a pr then merge the PR", "mở PR rồi merge vào main"):
+            text = hook_payload(prompt)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("The prompt asks to merge.", text, prompt)
+
+    def test_a_question_about_git_is_not_a_commit_request(self):
+        for prompt in (
+            "explain git commit vs git stash",
+            "how do I git commit?",
+            "what does git commit do",
+            "giải thích git commit",
+            "so sánh git commit và git stash",
+        ):
+            decision = classify(prompt)
+            self.assertNotIn("commit", decision["signals"], prompt)
+            self.assertEqual(decision["agent"], "main", prompt)
+            self.assertIsNone(hook_payload(prompt), prompt)
+
+    def test_a_commit_after_a_question_sentence_is_still_a_commit(self):
+        decision = classify("what broke here? then git commit the fix")
+        self.assertIn("commit", decision["signals"])
 
     def test_commit_word_is_not_a_commit_request(self):
         for prompt in (
@@ -182,9 +219,16 @@ class RouteTests(unittest.TestCase):
             [
                 {"stage": "implement", "agent": "main"},
                 {"stage": "review", "agent": "main"},
-                {"stage": "commit", "agent": "tier-haiku-release"},
-                {"stage": "pr", "agent": "main"},
+                {"stage": "pr", "agent": "tier-haiku-release"},
             ],
+        )
+
+    def test_an_explicit_commit_before_a_pr_is_one_release_stage(self):
+        decision = classify("git commit rồi make PR")
+        self.assertEqual(decision["signals"], ["commit", "pr"])
+        self.assertEqual(
+            decision["stages"],
+            [{"stage": "pr", "agent": "tier-haiku-release"}],
         )
 
     def test_review_then_fix_keeps_prompt_order(self):
@@ -229,29 +273,76 @@ class RouteTests(unittest.TestCase):
 
     def test_log_check_hook_leaves_analysis_on_main(self):
         text = hook_payload("check log của service xxx để xem có bugs ko")["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("`tier-haiku` fetches the log lines through MCP and returns those lines only", text)
+        self.assertIn("`tier-haiku` fetches the log lines and returns those lines only", text)
         self.assertIn("decide whether to continue on the main Opus session", text)
         self.assertIn("Do not leave the conclusion to the subagent.", text)
 
     def test_log_then_fix_hook_leaves_analysis_on_main(self):
         text = hook_payload("check log rồi sửa bug trong handler")["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("`tier-haiku` fetches the log lines through MCP and returns those lines only", text)
+        self.assertIn("`tier-haiku` fetches the log lines and returns those lines only", text)
         self.assertIn("analyze them and decide whether to continue on the main Opus session", text)
         self.assertIn("If that analysis finds no error, stop there.", text)
 
     def test_haiku_agent_fetches_logs_without_a_verdict(self):
         text = (Path(__file__).resolve().parent / "agents" / "tier-haiku.md").read_text(encoding="utf-8")
-        self.assertIn("MCP fetch.", text)
         self.assertIn("Do not label them as an error", text)
-        self.assertIn("If no MCP tool can return those logs, stop", text)
-        self.assertIn("Bash, Read, Grep, Glob, Write, Edit, NotebookEdit, Agent", text)
-        release = (Path(__file__).resolve().parent / "agents" / "tier-haiku-release.md").read_text(encoding="utf-8")
-        self.assertIn("Git commit.", release)
-        self.assertIn("If the paths are missing, stop", release)
-        self.assertIn("Do not open or merge a pull request.", release)
+        self.assertIn("If nothing can return those logs, stop", text)
+        # The log fetch keeps the read tools, so logs that only Bash can reach
+        # do not fall back onto the main session.
+        self.assertIn("disallowedTools: Write, Edit, NotebookEdit, Agent\n", text)
+        self.assertIn("`kubectl logs`", text)
         self.assertNotIn("có bằng chứng lỗi", text)
         self.assertNotIn("chưa thấy lỗi", text)
         self.assertNotIn("chưa đủ dữ liệu", text)
+
+    def test_release_agent_owns_the_push_and_refuses_history_rewrites(self):
+        release = (Path(__file__).resolve().parent / "agents" / "tier-haiku-release.md").read_text(encoding="utf-8")
+        self.assertIn("Commit, push, and pull request. The delegation asks for the pull request.", release)
+        self.assertIn("If a named path, the tag, or the file is missing, stop", release)
+        self.assertIn("Only when the delegation says to merge", release)
+        for forbidden in ("git add -A", "git commit --amend", "git reset", "git push --force"):
+            self.assertIn(forbidden, release)
+        self.assertIn("tools: Bash, Glob, Grep, Read, Edit\n", release)
+        # This agent writes to the repo and opens pull requests, so project
+        # instructions must reach it.
+        self.assertNotIn("omitClaudeMd", release)
+
+    def test_release_agent_stops_after_a_commit_only_stage(self):
+        release = (Path(__file__).resolve().parent / "agents" / "tier-haiku-release.md").read_text(encoding="utf-8")
+        self.assertIn("Pushing and opening a pull request are not implied by a commit", release)
+        self.assertIn("Commit only.", release)
+        self.assertIn("Do not push. Do not open a pull request.", release)
+        self.assertIn("stop and ask the main {{Main}} session for them", release)
+        # Commit, push, pull request, and an optional merge share one budget.
+        self.assertIn("maxTurns: 25\n", release)
+        self.assertIn("Report after each step that changed the repository or the remote", release)
+        text = hook_payload("git commit the retry handler")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("commits the named paths and stops there: no push, and no pull request", text)
+        self.assertIn("Say `commit only` in the delegation", text)
+
+    def test_an_explicit_merge_mid_sentence_is_still_seen(self):
+        for prompt in (
+            "make a PR then merge it, sau đó bump image tag",
+            "mở PR rồi gộp vào main",
+            "make pr rồi merge nhé",
+            "create a pr and merge",
+            "make PR & merge to main",
+            "make a pr then merge the PR",
+        ):
+            text = hook_payload(prompt)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("The prompt asks to merge.", text, prompt)
+
+    def test_a_conditional_clause_does_not_swallow_the_commit(self):
+        for prompt in ("when tests pass, git commit", "when ci is green then git commit the fix"):
+            self.assertIn("commit", classify(prompt)["signals"], prompt)
+
+    def test_the_ambiguity_table_picks_one_commit_owner(self):
+        text = hook_payload("lên kế hoạch sửa bug này")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Pick `commit` or `pr`, never both", text)
+
+    def test_no_stage_flag_is_left_unread(self):
+        source = (Path(__file__).resolve().parent / "route.py").read_text(encoding="utf-8")
+        self.assertNotIn("hint_on_main", source)
 
     def test_agent_files_use_latest_aliases_and_fast_haiku_settings(self):
         root = Path(__file__).resolve().parent / "agents"
@@ -291,7 +382,7 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(decision["signals"], ["implement", "pr"])
         self.assertEqual(
             [stage["stage"] for stage in decision["stages"]],
-            ["implement", "commit", "pr"],
+            ["implement", "pr"],
         )
 
     def test_review_pr_stays_on_main_opus(self):
@@ -310,15 +401,14 @@ class RouteTests(unittest.TestCase):
         text = hook_payload("lên plan rồi implement và make PR")["hookSpecificOutput"]["additionalContext"]
         self.assertIn("- plan -> `tier-opus`", text)
         self.assertIn("- implement -> handle directly on the main Opus session", text)
-        self.assertIn("- commit -> `tier-haiku-release` commits the named paths.", text)
-        self.assertIn("- pr -> open the pull request on the main Opus session", text)
-        self.assertIn("only after review and the fix are OK", text)
-        self.assertNotIn("If the message is missing", text)
+        self.assertIn("- pr -> `tier-haiku-release` commits, pushes, and opens the pull request", text)
+        self.assertIn("Start that stage only after review and the fix are OK", text)
+        self.assertNotIn("- commit ->", text)
 
-    def test_log_then_pr_hook_keeps_the_pr_on_main(self):
+    def test_log_then_pr_hook_keeps_the_release_in_one_stage(self):
         text = hook_payload("check log rồi make PR")["hookSpecificOutput"]["additionalContext"]
         self.assertIn("- log -> `tier-haiku`", text)
-        self.assertIn("- pr -> open the pull request on the main Opus session", text)
+        self.assertIn("- pr -> `tier-haiku-release` commits, pushes, and opens the pull request", text)
         self.assertNotIn("- commit ->", text)
 
     def test_stages_follow_prompt_order(self):
@@ -344,7 +434,7 @@ class RouteTests(unittest.TestCase):
             decision["stages"],
             [
                 {"stage": "plan", "agent": "tier-opus"},
-                {"stage": "pr", "agent": "main"},
+                {"stage": "pr", "agent": "tier-haiku-release"},
             ],
         )
 
@@ -364,21 +454,20 @@ class RouteTests(unittest.TestCase):
                 {"stage": "log", "agent": "tier-haiku"},
                 {"stage": "implement", "agent": "main"},
                 {"stage": "review", "agent": "main"},
-                {"stage": "commit", "agent": "tier-haiku-release"},
-                {"stage": "pr", "agent": "main"},
+                {"stage": "pr", "agent": "tier-haiku-release"},
                 {"stage": "bump", "agent": "tier-haiku-release"},
             ],
         )
         text = hook_payload(prompt)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Respect conditional gates", text)
         self.assertIn("directly on the main Opus session", text)
-        self.assertIn("- commit -> `tier-haiku-release` commits the named paths.", text)
-        self.assertIn("only after review and the fix are OK", text)
+        self.assertIn("- pr -> `tier-haiku-release` commits, pushes, and opens the pull request", text)
+        self.assertIn("Start that stage only after review and the fix are OK", text)
         self.assertIn("The prompt asks to merge.", text)
-        commit_at = text.index("- commit ->")
+        log_at = text.index("- log ->")
         pr_at = text.index("- pr ->")
         bump_at = text.index("- bump ->")
-        self.assertLess(commit_at, pr_at)
+        self.assertLess(log_at, pr_at)
         self.assertLess(pr_at, bump_at)
 
     def test_hook_stays_silent_on_slash_commands_mentions_and_pure_main_work(self):
@@ -461,8 +550,9 @@ class RouteTests(unittest.TestCase):
         self.assertIn('"model": "opus"', opus)
         self.assertIn("`tier-opus`", opus)
         self.assertNotIn("fix, review", opus)
-        self.assertIn("fetches the logs through MCP", opus)
-        self.assertIn("commits the reviewed paths", opus)
+        self.assertIn("fetches the logs and returns the lines only", opus)
+        self.assertIn("commits the named paths, pushes, and opens the pull request", opus)
+        self.assertIn("merge only when the prompt asks to merge", opus)
         self.assertIn("`tier-haiku-release`", opus)
         self.assertNotIn("{{", opus)
         self.assertIn("main Sonnet session", sonnet)

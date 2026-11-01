@@ -6,10 +6,10 @@ effort. `init.sh sonnet` installs Sonnet instead. Implementation, code review,
 and re-review stay on that main session in one shared context. Subagents are
 only spawned for a different role:
   - plan            -> tier-opus (opus, effort high)
-  - MCP log fetch   -> tier-haiku (haiku); main session analyzes and decides
-  - git commit      -> tier-haiku-release (haiku), before the PR
+  - log fetch       -> tier-haiku (haiku); main session analyzes and decides
+  - commit/push/PR  -> tier-haiku-release (haiku) as one stage; the main
+                       session writes the commit message and the PR body
   - image-tag bump  -> tier-haiku-release (haiku)
-  - PR              -> main session, after the commit and after review when asked
   - implement/review/default -> main session (config mainModel)
 """
 
@@ -159,6 +159,18 @@ _BUMP_RES = (
 # "commit". A cue before it, or a short cue after it, marks the request.
 _COMMIT_WORD = re.compile(r"\bcommit\b")
 _COMMIT_BLOCKED_AFTER = re.compile(r"\s+(?:to|message|messages|history|parser|hook|hash|id|sha)\b")
+# A question about git is not a request to commit. "git " is a cue below, so
+# "explain git commit" would otherwise read as one. The tail must stay in the
+# same sentence, so a question word in an earlier sentence does not block.
+# "when" and "which" are left out: they open a condition at least as often as
+# a question, and "when ci is green then git commit" is a request.
+_COMMIT_BLOCKED_BEFORE = re.compile(
+    r"(?:\b(?:explain|describe|compare|difference|differences|versus|vs|"
+    r"giai thich|so sanh|khac nhau|the nao|la gi)\b"
+    r"|\bwhat(?:'?s)?\b|\bwhy\b"
+    r"|\bhow\s+(?:do|does|did|can|could|should|to|about)\b)"
+    r"[^.?!]*$"
+)
 _COMMIT_SUFFIX = re.compile(r"\s+(?:di|giup|help|code|changes|this|it|them|these|cac|file|files)\b")
 _COMMIT_CUES = (
     "git ",
@@ -184,7 +196,18 @@ _COMMIT_CUES = (
     ". ",
 )
 _ORDERED_SEQUENCE = re.compile(r"\b(?:roi|sau do|tiep theo|then|and then)\b")
-_MERGE_WORD = re.compile(r"\bmerge\b")
+# Merging is irreversible, so the word is read broadly and the noun phrases
+# are subtracted: "fix the merge conflict" and "merge strategy" name a thing,
+# while "merge it", "gộp vào main" and "and merge" ask for the merge itself.
+_MERGE_WORD = re.compile(r"\b(?:merge|gop)\b")
+_MERGE_BLOCKED_AFTER = re.compile(
+    r"\s+(?:conflict|conflicts|strategy|strategies|queue|commit|commits|base|"
+    r"driver|tool|tools|window|policy|rule|rules|issue|issues|error|errors|"
+    r"xung dot|chien luoc)\b"
+)
+# Checked on top of _NEGATION_BEFORE, which omits a bare "không" on purpose
+# because a trailing "không" is a question particle.
+_MERGE_NEGATION = re.compile(r"(?:\bkhong\b|\bko\b|\bchua\b)\s*$")
 _LOG_RES = (
     re.compile(r"\b(?:check|kiem tra|xem|doc|read|tail)\s+(?:the\s+)?logs?(?:\s+(?:cua|\d+))?(?:\s+(?:service|agent|pod)s?)?\b"),
     re.compile(r"\breviews?\s+(?:the\s+)?(?:(?:service|agent)\s+)?logs?\b"),
@@ -210,10 +233,9 @@ _EXPLICIT_AGENT = re.compile(
 class _Stage:
     """One routing stage. The hint line is the only sentence the hook renders for it."""
 
-    def __init__(self, agent: str, model: str | None, hint_on_main: bool, line: str) -> None:
+    def __init__(self, agent: str, model: str | None, line: str) -> None:
         self.agent = agent
         self.model = model
-        self.hint_on_main = hint_on_main
         self.line = line
 
 
@@ -222,15 +244,13 @@ _STAGES = {
     "plan": _Stage(
         "tier-opus",
         "opus",
-        False,
         "- plan -> `tier-opus`",
     ),
     "log": _Stage(
         "tier-haiku",
         "haiku",
-        False,
-        "- log -> `tier-haiku` fetches the log lines through MCP and returns those lines only. "
-        "If no MCP tool can return those logs, it stops and does not guess lines; "
+        "- log -> `tier-haiku` fetches the log lines and returns those lines only. "
+        "If it cannot reach the logs, it stops and does not guess lines; "
         "analyze them and decide whether to continue on the main {label} session. "
         "Do not leave the conclusion to the subagent. "
         "If that analysis finds no error, stop there.",
@@ -238,40 +258,38 @@ _STAGES = {
     "implement": _Stage(
         "main",
         None,
-        False,
         "- implement -> handle directly on the main {label} session (do NOT spawn a subagent)",
     ),
     "review": _Stage(
         "main",
         None,
-        False,
         "- review -> handle directly on the main {label} session (do NOT spawn a subagent)",
     ),
     "commit": _Stage(
         "tier-haiku-release",
         "haiku",
-        False,
-        "- commit -> `tier-haiku-release` commits the named paths. "
-        "Write the commit message on the main session and pass it with those paths. "
+        "- commit -> `tier-haiku-release` commits the named paths and stops there: "
+        "no push, and no pull request. "
+        "Say `commit only` in the delegation so the subagent stops after the commit. "
+        "Write the commit message on the main {label} session and pass it with those paths. "
         "If the paths are missing, the subagent stops.",
     ),
     "pr": _Stage(
-        "main",
-        None,
-        True,
-        "- pr -> open the pull request on the main {label} session (do NOT spawn a subagent)",
+        "tier-haiku-release",
+        "haiku",
+        "- pr -> `tier-haiku-release` commits, pushes, and opens the pull request in one stage. "
+        "Write the commit message and the pull request title and body on the main {label} session "
+        "and pass them with the exact paths.",
     ),
     "bump": _Stage(
         "tier-haiku-release",
         "haiku",
-        False,
         "- bump -> `tier-haiku-release` changes the named image tag. "
         "If the tag or the file is missing, it stops.",
     ),
     "default": _Stage(
         "main",
         None,
-        False,
         "- default -> handle directly on the main {label} session (do NOT spawn a subagent)",
     ),
 }
@@ -309,9 +327,23 @@ def _commit_spans(text: str) -> list[tuple[int, int]]:
         if _COMMIT_BLOCKED_AFTER.match(after):
             continue
         before = text[: match.start()]
+        if _COMMIT_BLOCKED_BEFORE.search(before):
+            continue
         if _commit_cue(before) or _COMMIT_SUFFIX.match(after):
             spans.append((match.start(), match.end()))
     return spans
+
+
+def _merge_requested(text: str) -> bool:
+    """True only when the prompt asks for the merge itself, not for a noun."""
+    for match in _MERGE_WORD.finditer(text):
+        if _MERGE_BLOCKED_AFTER.match(text[match.end() :]):
+            continue
+        before = text[max(0, match.start() - 48) : match.start()]
+        if _NEGATION_BEFORE.search(before) or _MERGE_NEGATION.search(before):
+            continue
+        return True
+    return False
 
 
 def _spans(pattern: re.Pattern[str], text: str) -> list[tuple[int, int]]:
@@ -431,10 +463,8 @@ def _decision(
 
 
 def _stage_list(names: list[str]) -> list[dict]:
-    """Place the release commit immediately before the pull request."""
-    ordered = list(names)
-    if "pr" in ordered and "commit" not in ordered and any(name in ordered for name in ("implement", "review")):
-        ordered.insert(ordered.index("pr"), "commit")
+    """The `pr` stage already covers the commit, so drop a duplicate commit."""
+    ordered = [name for name in names if not (name == "commit" and "pr" in names)]
     return [{"stage": name, "agent": _STAGES[name].agent} for name in ordered]
 
 
@@ -469,7 +499,8 @@ def _format_stage(stage: dict, label: str) -> str:
 
 
 def _needs_hint(stages: list[dict]) -> bool:
-    return any(_STAGES[stage["stage"]].hint_on_main or _STAGES[stage["stage"]].agent != "main" for stage in stages)
+    """A hint is worth its tokens only when some stage leaves the main session."""
+    return any(_STAGES[stage["stage"]].agent != "main" for stage in stages)
 
 
 def _pr_followup(task: str, stages: list[dict]) -> str:
@@ -477,17 +508,16 @@ def _pr_followup(task: str, stages: list[dict]) -> str:
     names = {stage["stage"] for stage in stages}
     if "pr" not in names:
         return ""
-    text = "Do not create the git commit on the main session. "
-    if "commit" not in names:
-        text += (
-            "If the changes are not committed yet, spawn `tier-haiku-release` to commit the reviewed paths first. "
-            "Write the commit message on the main session and pass it with those paths. "
-            "If the paths are missing, the subagent stops. "
-        )
+    text = (
+        "The commit, the push, and the pull request are one `tier-haiku-release` stage, "
+        "so the commit never lands without the push that the pull request needs. "
+    )
     if names.intersection({"implement", "review"}):
-        text += "Open the pull request only after review and the fix are OK when the prompt asks for a review. "
-    if _MERGE_WORD.search(fold(task)):
-        text += "The prompt asks to merge. Merge from the main session after the pull request is open. "
+        text += "Start that stage only after review and the fix are OK when the prompt asks for a review. "
+    if _merge_requested(fold(task)):
+        text += "The prompt asks to merge. `tier-haiku-release` merges after the pull request is open. "
+    else:
+        text += "The prompt does not ask to merge, so do not merge. "
     return text
 
 
@@ -497,11 +527,11 @@ def _hint(task: str, decision: dict, label: str) -> str:
     return (
         "Orchestrator hint only. Run each stage in order:\n"
         f"{lines}\n"
-        f"Do `implement`, `review`, re-review, and the pull request directly on the main {label} session in this same context. "
+        f"Do `implement`, `review`, and re-review directly on the main {label} session in this same context. "
         "Codebase search may use `Explore`. "
         f"{_pr_followup(task, stages)}"
         "Respect conditional gates in the prompt (e.g., 'nếu có issues', 'ok thì'). "
-        "If review finds issues, fix and re-review on the main session before the commit and the pull request. "
+        "If review finds issues, fix and re-review on the main session before the release stage. "
         "An explicit @-mention overrides this hint."
     )
 
@@ -518,6 +548,7 @@ def hook_payload(task: str) -> dict | None:
             "If they only want a plan, delegate only that stage to `tier-opus`. "
             "If they want several stages:\n"
             f"{_stage_table(label)}\n"
+            "Pick `commit` or `pr`, never both: the `pr` stage already makes the commit. "
             "An explicit @-mention overrides this hint."
         )
     elif not _needs_hint(decision["stages"] or []):

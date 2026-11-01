@@ -2,7 +2,7 @@
 name: model-router
 description: >
   Route stages before delegating. Use when the user mentions routing, which
-  model, Haiku, Sonnet, Opus, check log, MCP, lên plan, git commit, make PR,
+  model, Haiku, Sonnet, Opus, check log, lên plan, git commit, make PR, merge,
   or bump image tag.
 ---
 
@@ -15,8 +15,9 @@ Follow the orchestrator hint when this conversation has one. That hint lists the
 When no hint is present, do the work on the main {{Main}} session. That covers implementation, review, and re-review.
 
 - `tier-opus` writes a plan
-- `tier-haiku` fetches the logs through MCP and returns the lines only
-- `tier-haiku-release` commits the reviewed paths and bumps an image tag. The main session writes the commit message
-- the main {{Main}} session opens the pull request and does not create the git commit
+- `tier-haiku` fetches the logs and returns the lines only. Analyze them on the main {{Main}} session
+- `tier-haiku-release` commits the named paths, pushes, and opens the pull request as one stage, and bumps an image tag. The main {{Main}} session writes the commit message and the pull request title and body
+- a commit with no pull request asked for is a `commit only` delegation: `tier-haiku-release` stops after the commit
+- merge only when the prompt asks to merge
 
 Codebase search may use `Explore`. An explicit @-mention (`@tier-haiku`, `@tier-haiku-release`, `@tier-opus`) overrides the hint.

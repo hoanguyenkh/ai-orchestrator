@@ -69,7 +69,7 @@ else
 fi
 
 echo "Updated Claude Code config in $CLAUDE"
-echo "  agents: tier-haiku (MCP logs), tier-haiku-release (git commit, image tag), tier-opus, Explore (PR stays on the main session)"
+echo "  agents: tier-haiku (logs), tier-haiku-release (commit+push+PR, image tag), tier-opus, Explore (code and review stay on the main session)"
 echo "  skill:  skills/model-router"
 echo "  hook:   UserPromptSubmit -> $HOOK"
 echo "  model:  main session set to $MODEL, effort $EFFORT, default subagent model set to $SUB"
