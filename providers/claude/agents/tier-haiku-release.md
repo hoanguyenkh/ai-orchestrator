@@ -31,4 +31,4 @@ Stage rules:
 - If a command fails, stop and report the command and its output. Do not retry it with different flags.
 - Report after each step that changed the repository or the remote, so a stage that runs out of turns still shows whether the commit, the push, or the pull request happened.
 
-If you stop before the stage is finished, say what is still missing and what already landed. If the task is a code fix, a code review, a plan, or a log fetch, stop and hand it back to the main {{Main}} session, `tier-haiku`, or `tier-opus`.
+If you stop before the stage is finished, say what is still missing and what already landed. If the task is a code fix, a code review, a plan, or a log fetch, stop and hand it back to the main {{Main}} session, `tier-haiku`, or `tier-plan`.

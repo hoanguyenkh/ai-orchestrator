@@ -53,12 +53,12 @@ class RouteTests(unittest.TestCase):
 
     def test_plan_is_opus(self):
         decision = classify("Lên plan code")
-        self.assertEqual(decision["agent"], "tier-opus")
+        self.assertEqual(decision["agent"], "tier-plan")
         self.assertEqual(decision["rule"], "plan")
 
     def test_plan_whose_subject_is_a_fix_stays_opus(self):
         decision = classify("lên plan để fix bug service payment")
-        self.assertEqual(decision["agent"], "tier-opus")
+        self.assertEqual(decision["agent"], "tier-plan")
         self.assertEqual(decision["rule"], "plan")
 
     def test_negated_plan_then_fix_is_main_opus(self):
@@ -77,7 +77,7 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(
             decision["stages"],
             [
-                {"stage": "plan", "agent": "tier-opus"},
+                {"stage": "plan", "agent": "tier-plan"},
                 {"stage": "implement", "agent": "main"},
                 {"stage": "pr", "agent": "tier-haiku-release"},
             ],
@@ -263,7 +263,7 @@ class RouteTests(unittest.TestCase):
 
     def test_plan_for_a_feature_is_opus(self):
         decision = classify("plan cho tính năng refund")
-        self.assertEqual(decision["agent"], "tier-opus")
+        self.assertEqual(decision["agent"], "tier-plan")
         self.assertEqual(decision["rule"], "plan")
 
     def test_check_agent_log_is_haiku(self):
@@ -349,7 +349,7 @@ class RouteTests(unittest.TestCase):
         expected = {
             "tier-haiku.md": "haiku",
             "tier-haiku-release.md": "haiku",
-            "tier-opus.md": "fable",
+            "tier-plan.md": "fable",
             "Explore.md": "sonnet",
         }
         self.assertFalse((root / "tier-sonnet.md").exists())
@@ -395,7 +395,7 @@ class RouteTests(unittest.TestCase):
 
     def test_split_hook_lists_each_stage(self):
         text = hook_payload("lên plan rồi implement và make PR")["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("- plan -> `tier-opus`", text)
+        self.assertIn("- plan -> `tier-plan`", text)
         self.assertIn("- implement -> handle directly on the main Opus session", text)
         self.assertIn("- pr -> `tier-haiku-release` commits, pushes, and opens the pull request", text)
         self.assertIn("Start that stage only after review and the fix are OK", text)
@@ -414,7 +414,7 @@ class RouteTests(unittest.TestCase):
             decision["stages"],
             [
                 {"stage": "log", "agent": "tier-haiku"},
-                {"stage": "plan", "agent": "tier-opus"},
+                {"stage": "plan", "agent": "tier-plan"},
             ],
         )
 
@@ -429,7 +429,7 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(
             decision["stages"],
             [
-                {"stage": "plan", "agent": "tier-opus"},
+                {"stage": "plan", "agent": "tier-plan"},
                 {"stage": "pr", "agent": "tier-haiku-release"},
             ],
         )
@@ -467,7 +467,7 @@ class RouteTests(unittest.TestCase):
         self.assertLess(pr_at, bump_at)
 
     def test_hook_stays_silent_on_slash_commands_mentions_and_pure_main_work(self):
-        for prompt in ("/agents", "@tier-haiku fix this", "@agent-tier-opus check log", "Fix và review"):
+        for prompt in ("/agents", "@tier-haiku fix this", "@agent-tier-plan check log", "Fix và review"):
             stdin = io.StringIO(json.dumps({"prompt": prompt}))
             stdout = io.StringIO()
             with patch("sys.stdin", stdin), patch("sys.stdout", stdout):
@@ -522,16 +522,16 @@ class RouteTests(unittest.TestCase):
 
     def test_plan_runs_on_fable_at_high_effort(self):
         decision = classify("lên plan cho feature X")
-        self.assertEqual(decision["agent"], "tier-opus")
+        self.assertEqual(decision["agent"], "tier-plan")
         self.assertEqual(decision["model"], "fable")
-        plan = (Path(__file__).resolve().parent / "agents" / "tier-opus.md").read_text(encoding="utf-8")
+        plan = (Path(__file__).resolve().parent / "agents" / "tier-plan.md").read_text(encoding="utf-8")
         self.assertIn("model: fable\n", plan)
         self.assertIn("effort: high\n", plan)
 
     def test_every_agent_pins_its_own_model(self):
         root = Path(__file__).resolve().parent / "agents"
         files = sorted(path.name for path in root.glob("*.md"))
-        self.assertEqual(files, ["Explore.md", "tier-haiku-release.md", "tier-haiku.md", "tier-opus.md"])
+        self.assertEqual(files, ["Explore.md", "tier-haiku-release.md", "tier-haiku.md", "tier-plan.md"])
         for name in files:
             front = (root / name).read_text(encoding="utf-8").split("---")[1]
             self.assertRegex(front, r"\nmodel: (?:haiku|sonnet|opus|fable)\n", name)
@@ -577,7 +577,7 @@ class RouteTests(unittest.TestCase):
         sonnet = render_text(raw, "sonnet", "high")
         self.assertIn("main Opus session", opus)
         self.assertIn('"model": "opus"', opus)
-        self.assertIn("`tier-opus`", opus)
+        self.assertIn("`tier-plan`", opus)
         self.assertNotIn("fix, review", opus)
         self.assertIn("fetches the logs and returns the lines only", opus)
         self.assertIn("commits the named paths, pushes, and opens the pull request", opus)
@@ -585,19 +585,19 @@ class RouteTests(unittest.TestCase):
         self.assertIn("`tier-haiku-release`", opus)
         self.assertNotIn("{{", opus)
         self.assertIn("main Sonnet session", sonnet)
-        self.assertIn("`tier-opus`", sonnet)
+        self.assertIn("`tier-plan`", sonnet)
         self.assertNotIn("tier-sonnet", sonnet)
         self.assertNotIn("{{", sonnet)
 
     def test_agent_templates_render_the_main_model(self):
         root = Path(__file__).resolve().parent / "agents"
-        for name in ("tier-opus.md", "tier-haiku.md", "tier-haiku-release.md", "Explore.md"):
+        for name in ("tier-plan.md", "tier-haiku.md", "tier-haiku-release.md", "Explore.md"):
             rendered = render_text((root / name).read_text(encoding="utf-8"), "opus", "high")
             self.assertNotIn("{{", rendered)
             self.assertIn("Opus", rendered)
         # A leftover "Sonnet" would mean an unrendered {{Main}} or a stale
         # tier-sonnet reference. Explore names Sonnet as its own pinned model.
-        for name in ("tier-opus.md", "tier-haiku.md", "tier-haiku-release.md"):
+        for name in ("tier-plan.md", "tier-haiku.md", "tier-haiku-release.md"):
             rendered = render_text((root / name).read_text(encoding="utf-8"), "opus", "high")
             self.assertNotIn("Sonnet", rendered, name)
 

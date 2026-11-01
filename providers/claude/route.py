@@ -5,7 +5,7 @@ The main session model comes from config.json. The default is Opus at high
 effort. `init.sh sonnet` installs Sonnet instead. Implementation, code review,
 and re-review stay on that main session in one shared context. Subagents are
 only spawned for a different role:
-  - plan            -> tier-opus (fable, effort high)
+  - plan            -> tier-plan (fable, effort high)
   - log fetch       -> tier-haiku (haiku); main session analyzes and decides
   - commit/push/PR  -> tier-haiku-release (haiku) as one stage; the main
                        session writes the commit message and the PR body
@@ -230,7 +230,7 @@ _NEGATION_BEFORE = re.compile(
     r"\bskip\b|\bwithout\b|\bbo qua\b)\s*$"
 )
 _EXPLICIT_AGENT = re.compile(
-    r"@(?:\"|\b)(?:agent-)?(?:tier-(?:haiku-release|haiku|opus)|explore)\b",
+    r"@(?:\"|\b)(?:agent-)?(?:tier-(?:haiku-release|haiku|plan)|explore)\b",
     re.IGNORECASE,
 )
 
@@ -246,9 +246,9 @@ class _Stage:
 # model is None when the stage stays on the configured main session.
 _STAGES = {
     "plan": _Stage(
-        "tier-opus",
+        "tier-plan",
         "fable",
-        "- plan -> `tier-opus`",
+        "- plan -> `tier-plan`",
     ),
     "log": _Stage(
         "tier-haiku",
@@ -549,7 +549,7 @@ def hook_payload(task: str) -> dict | None:
             "Orchestrator hint only. This sentence is ambiguous. "
             f"Keyword signals noticed: {noticed}. Decide the user's intent before acting. "
             "Do not add an implement, review, log, or PR stage unless they asked for that work to be carried out. "
-            "If they only want a plan, delegate only that stage to `tier-opus`. "
+            "If they only want a plan, delegate only that stage to `tier-plan`. "
             "If they want several stages:\n"
             f"{_stage_table(label)}\n"
             "Pick `commit` or `pr`, never both: the `pr` stage already makes the commit. "

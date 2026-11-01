@@ -1,5 +1,5 @@
 ---
-name: tier-opus
+name: tier-plan
 description: >
   Use when the user asks to plan code or plan a feature. Do not use to
   implement, improve, review code, check logs, commit, bump an image tag, or
