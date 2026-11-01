@@ -79,11 +79,12 @@ class RouteTests(unittest.TestCase):
             [
                 {"stage": "plan", "agent": "tier-opus"},
                 {"stage": "implement", "agent": "main"},
-                {"stage": "pr", "agent": "tier-haiku"},
+                {"stage": "commit", "agent": "tier-haiku-release"},
+                {"stage": "pr", "agent": "main"},
             ],
         )
 
-    def test_log_then_pr_is_two_haiku_stages(self):
+    def test_log_then_pr_keeps_the_pr_on_main(self):
         decision = classify("check log rồi make PR")
         self.assertEqual(decision["rule"], "split")
         self.assertIsNone(decision["agent"])
@@ -91,7 +92,7 @@ class RouteTests(unittest.TestCase):
             decision["stages"],
             [
                 {"stage": "log", "agent": "tier-haiku"},
-                {"stage": "pr", "agent": "tier-haiku"},
+                {"stage": "pr", "agent": "main"},
             ],
         )
 
@@ -103,7 +104,7 @@ class RouteTests(unittest.TestCase):
             decision["stages"],
             [
                 {"stage": "log", "agent": "tier-haiku"},
-                {"stage": "pr", "agent": "tier-haiku"},
+                {"stage": "bump", "agent": "tier-haiku-release"},
             ],
         )
 
@@ -116,10 +117,90 @@ class RouteTests(unittest.TestCase):
         self.assertIn("Decide the user's intent before acting", text)
         self.assertIn("Do not add an implement", text)
 
-    def test_make_pr_and_bump_tag_is_haiku(self):
+    def test_make_pr_and_bump_tag_splits_pr_onto_main(self):
         decision = classify("Make Pr & bump image tag")
-        self.assertEqual(decision["agent"], "tier-haiku")
-        self.assertEqual(decision["rule"], "pr-or-bump")
+        self.assertEqual(decision["rule"], "split")
+        self.assertIsNone(decision["agent"])
+        self.assertEqual(
+            decision["stages"],
+            [
+                {"stage": "pr", "agent": "main"},
+                {"stage": "bump", "agent": "tier-haiku-release"},
+            ],
+        )
+
+    def test_git_commit_is_haiku(self):
+        decision = classify("git commit the retry handler")
+        self.assertEqual(decision["agent"], "tier-haiku-release")
+        self.assertEqual(decision["rule"], "commit")
+
+    def test_fix_then_commit_splits_before_the_commit_word(self):
+        decision = classify("fix rồi commit")
+        self.assertEqual(decision["rule"], "split")
+        self.assertEqual(
+            [stage["stage"] for stage in decision["stages"]],
+            ["implement", "commit"],
+        )
+
+    def test_commit_to_a_plan_is_not_a_commit_stage(self):
+        decision = classify("commit to the refund plan")
+        self.assertNotIn("commit", decision["signals"])
+        self.assertEqual(decision["agent"], "main")
+
+    def test_make_pr_stays_on_main(self):
+        decision = classify("make a PR")
+        self.assertEqual(decision["agent"], "main")
+        self.assertEqual(decision["rule"], "pr")
+        text = hook_payload("make a PR")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Do not create the git commit on the main session.", text)
+        self.assertIn("`tier-haiku-release` to commit the reviewed paths first", text)
+        self.assertNotIn("The prompt asks to merge.", text)
+
+    def test_make_pr_and_merge_keeps_merge_on_main(self):
+        text = hook_payload("make PR & merge to main")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("open the pull request on the main Opus session", text)
+        self.assertIn("The prompt asks to merge.", text)
+
+    def test_commit_word_is_not_a_commit_request(self):
+        for prompt in (
+            "fix the commit parser",
+            "sửa lỗi commit",
+            "show the commit history",
+            "revert the last commit",
+            "digit commit",
+            "band commit",
+        ):
+            decision = classify(prompt)
+            self.assertNotIn("commit", decision["signals"], prompt)
+            self.assertEqual(decision["agent"], "main", prompt)
+            self.assertNotEqual(decision["rule"], "confirm", prompt)
+
+    def test_loose_review_and_fix_runs_the_fix_first(self):
+        decision = classify("review & fix ok thì make PR")
+        self.assertEqual(
+            decision["stages"],
+            [
+                {"stage": "implement", "agent": "main"},
+                {"stage": "review", "agent": "main"},
+                {"stage": "commit", "agent": "tier-haiku-release"},
+                {"stage": "pr", "agent": "main"},
+            ],
+        )
+
+    def test_review_then_fix_keeps_prompt_order(self):
+        decision = classify("review rồi sửa bug")
+        self.assertEqual(
+            decision["stages"],
+            [
+                {"stage": "review", "agent": "main"},
+                {"stage": "implement", "agent": "main"},
+            ],
+        )
+
+    def test_metric_tag_is_not_an_image_bump(self):
+        decision = classify("change the tag on the metric")
+        self.assertNotIn("bump", decision["signals"])
+        self.assertEqual(decision["agent"], "main")
 
     def test_improve_and_implement_stay_on_main_opus(self):
         for prompt in ("improve the retry handler", "implement pagination"):
@@ -148,20 +229,26 @@ class RouteTests(unittest.TestCase):
 
     def test_log_check_hook_leaves_analysis_on_main(self):
         text = hook_payload("check log của service xxx để xem có bugs ko")["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("Spawn `tier-haiku` (model: haiku) only to fetch the log lines.", text)
-        self.assertIn("decide what they mean on the main Opus session", text)
+        self.assertIn("`tier-haiku` fetches the log lines through MCP and returns those lines only", text)
+        self.assertIn("decide whether to continue on the main Opus session", text)
         self.assertIn("Do not leave the conclusion to the subagent.", text)
 
     def test_log_then_fix_hook_leaves_analysis_on_main(self):
         text = hook_payload("check log rồi sửa bug trong handler")["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("`tier-haiku` returns the log lines only", text)
+        self.assertIn("`tier-haiku` fetches the log lines through MCP and returns those lines only", text)
         self.assertIn("analyze them and decide whether to continue on the main Opus session", text)
         self.assertIn("If that analysis finds no error, stop there.", text)
 
     def test_haiku_agent_fetches_logs_without_a_verdict(self):
         text = (Path(__file__).resolve().parent / "agents" / "tier-haiku.md").read_text(encoding="utf-8")
-        self.assertIn("Log fetch.", text)
+        self.assertIn("MCP fetch.", text)
         self.assertIn("Do not label them as an error", text)
+        self.assertIn("If no MCP tool can return those logs, stop", text)
+        self.assertIn("Bash, Read, Grep, Glob, Write, Edit, NotebookEdit, Agent", text)
+        release = (Path(__file__).resolve().parent / "agents" / "tier-haiku-release.md").read_text(encoding="utf-8")
+        self.assertIn("Git commit.", release)
+        self.assertIn("If the paths are missing, stop", release)
+        self.assertIn("Do not open or merge a pull request.", release)
         self.assertNotIn("có bằng chứng lỗi", text)
         self.assertNotIn("chưa thấy lỗi", text)
         self.assertNotIn("chưa đủ dữ liệu", text)
@@ -170,6 +257,7 @@ class RouteTests(unittest.TestCase):
         root = Path(__file__).resolve().parent / "agents"
         expected = {
             "tier-haiku.md": "haiku",
+            "tier-haiku-release.md": "haiku",
             "tier-opus.md": "opus",
             "Explore.md": "haiku",
         }
@@ -184,6 +272,10 @@ class RouteTests(unittest.TestCase):
         self.assertIn("effort: medium\n", haiku_text)
         self.assertIn("maxTurns: 15\n", haiku_text)
         self.assertIn("omitClaudeMd: true\n", haiku_text)
+        explore = (root / "Explore.md").read_text(encoding="utf-8")
+        self.assertIn("effort: medium\n", explore)
+        self.assertIn("tools: Glob, Grep, Read\n", explore)
+        self.assertIn("Cite a line only after you have Read that file.", explore)
 
     def test_other_stays_on_main_opus(self):
         decision = classify("thêm pagination cho orders endpoint")
@@ -197,6 +289,10 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(decision["rule"], "split")
         self.assertIsNone(decision["agent"])
         self.assertEqual(decision["signals"], ["implement", "pr"])
+        self.assertEqual(
+            [stage["stage"] for stage in decision["stages"]],
+            ["implement", "commit", "pr"],
+        )
 
     def test_review_pr_stays_on_main_opus(self):
         decision = classify("review the pull request")
@@ -214,12 +310,16 @@ class RouteTests(unittest.TestCase):
         text = hook_payload("lên plan rồi implement và make PR")["hookSpecificOutput"]["additionalContext"]
         self.assertIn("- plan -> `tier-opus`", text)
         self.assertIn("- implement -> handle directly on the main Opus session", text)
-        self.assertIn("- pr -> `tier-haiku`", text)
+        self.assertIn("- commit -> `tier-haiku-release` commits the named paths.", text)
+        self.assertIn("- pr -> open the pull request on the main Opus session", text)
+        self.assertIn("only after review and the fix are OK", text)
+        self.assertNotIn("If the message is missing", text)
 
-    def test_same_model_split_hook_spawns_haiku_twice(self):
+    def test_log_then_pr_hook_keeps_the_pr_on_main(self):
         text = hook_payload("check log rồi make PR")["hookSpecificOutput"]["additionalContext"]
         self.assertIn("- log -> `tier-haiku`", text)
-        self.assertIn("- pr -> `tier-haiku`", text)
+        self.assertIn("- pr -> open the pull request on the main Opus session", text)
+        self.assertNotIn("- commit ->", text)
 
     def test_stages_follow_prompt_order(self):
         decision = classify("check log rồi lên plan")
@@ -244,7 +344,7 @@ class RouteTests(unittest.TestCase):
             decision["stages"],
             [
                 {"stage": "plan", "agent": "tier-opus"},
-                {"stage": "pr", "agent": "tier-haiku"},
+                {"stage": "pr", "agent": "main"},
             ],
         )
 
@@ -264,12 +364,22 @@ class RouteTests(unittest.TestCase):
                 {"stage": "log", "agent": "tier-haiku"},
                 {"stage": "implement", "agent": "main"},
                 {"stage": "review", "agent": "main"},
-                {"stage": "pr", "agent": "tier-haiku"},
+                {"stage": "commit", "agent": "tier-haiku-release"},
+                {"stage": "pr", "agent": "main"},
+                {"stage": "bump", "agent": "tier-haiku-release"},
             ],
         )
         text = hook_payload(prompt)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Respect conditional gates", text)
         self.assertIn("directly on the main Opus session", text)
+        self.assertIn("- commit -> `tier-haiku-release` commits the named paths.", text)
+        self.assertIn("only after review and the fix are OK", text)
+        self.assertIn("The prompt asks to merge.", text)
+        commit_at = text.index("- commit ->")
+        pr_at = text.index("- pr ->")
+        bump_at = text.index("- bump ->")
+        self.assertLess(commit_at, pr_at)
+        self.assertLess(pr_at, bump_at)
 
     def test_hook_stays_silent_on_slash_commands_mentions_and_pure_main_work(self):
         for prompt in ("/agents", "@tier-haiku fix this", "@agent-tier-opus check log", "Fix và review"):
@@ -350,6 +460,10 @@ class RouteTests(unittest.TestCase):
         self.assertIn("main Opus session", opus)
         self.assertIn('"model": "opus"', opus)
         self.assertIn("`tier-opus`", opus)
+        self.assertNotIn("fix, review", opus)
+        self.assertIn("fetches the logs through MCP", opus)
+        self.assertIn("commits the reviewed paths", opus)
+        self.assertIn("`tier-haiku-release`", opus)
         self.assertNotIn("{{", opus)
         self.assertIn("main Sonnet session", sonnet)
         self.assertIn("`tier-opus`", sonnet)
@@ -358,7 +472,7 @@ class RouteTests(unittest.TestCase):
 
     def test_agent_templates_render_the_main_model(self):
         root = Path(__file__).resolve().parent / "agents"
-        for name in ("tier-opus.md", "tier-haiku.md", "Explore.md"):
+        for name in ("tier-opus.md", "tier-haiku.md", "tier-haiku-release.md", "Explore.md"):
             rendered = render_text((root / name).read_text(encoding="utf-8"), "opus", "high")
             self.assertNotIn("{{", rendered)
             self.assertIn("Opus", rendered)

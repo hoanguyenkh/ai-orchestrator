@@ -6,8 +6,10 @@ effort. `init.sh sonnet` installs Sonnet instead. Implementation, code review,
 and re-review stay on that main session in one shared context. Subagents are
 only spawned for a different role:
   - plan            -> tier-opus (opus, effort high)
-  - log fetch       -> tier-haiku (haiku); main session analyzes and decides
-  - PR / bump tag   -> tier-haiku (haiku)
+  - MCP log fetch   -> tier-haiku (haiku); main session analyzes and decides
+  - git commit      -> tier-haiku-release (haiku), before the PR
+  - image-tag bump  -> tier-haiku-release (haiku)
+  - PR              -> main session, after the commit and after review when asked
   - implement/review/default -> main session (config mainModel)
 """
 
@@ -114,7 +116,7 @@ def render_text(text: str, main_model: str, main_effort: str) -> str:
         .replace("{{Main}}", model_label(main_model))
     )
 
-_SIGNAL_ORDER = ("plan", "log", "implement", "review", "pr")
+_SIGNAL_ORDER = ("plan", "log", "implement", "review", "commit", "pr", "bump")
 
 _PLAN_RES = (
     re.compile(r"\blen plan\b"),
@@ -147,8 +149,42 @@ _PR_RES = (
     re.compile(r"\b(?:make|tao|mo|open|create|merge)\s+(?:a\s+)?(?:pr|pull request)\b"),
     re.compile(r"\bmerge\s+(?:to|into|vao)\s+\w+\b"),
     re.compile(r"\bgh pr\b"),
-    re.compile(r"\b(?:bump|update|cap nhat|nang|doi|change)(?:\s+\w+){0,2}\s+(?:image(?:\s+tag)?|tag)\b"),
 )
+# A bump is an image-tag change. "change the tag" on a metric is not one.
+_BUMP_RES = (
+    re.compile(r"\b(?:bump|update|cap nhat|nang|doi|change)(?:\s+\w+){0,3}\s+image(?:\s+tag)?\b"),
+    re.compile(r"\bbump(?:\s+\w+){0,2}\s+tag\b"),
+)
+# A commit stage is a request to create a commit. The span is only the word
+# "commit". A cue before it, or a short cue after it, marks the request.
+_COMMIT_WORD = re.compile(r"\bcommit\b")
+_COMMIT_BLOCKED_AFTER = re.compile(r"\s+(?:to|message|messages|history|parser|hook|hash|id|sha)\b")
+_COMMIT_SUFFIX = re.compile(r"\s+(?:di|giup|help|code|changes|this|it|them|these|cac|file|files)\b")
+_COMMIT_CUES = (
+    "git ",
+    "hay ",
+    "please ",
+    "lam mot ",
+    "lam ",
+    "tao mot ",
+    "tao ",
+    "create a ",
+    "create ",
+    "make a ",
+    "make ",
+    "sau do ",
+    "tiep theo ",
+    "and then ",
+    "then ",
+    "and ",
+    "roi ",
+    "va ",
+    "& ",
+    "&",
+    ". ",
+)
+_ORDERED_SEQUENCE = re.compile(r"\b(?:roi|sau do|tiep theo|then|and then)\b")
+_MERGE_WORD = re.compile(r"\bmerge\b")
 _LOG_RES = (
     re.compile(r"\b(?:check|kiem tra|xem|doc|read|tail)\s+(?:the\s+)?logs?(?:\s+(?:cua|\d+))?(?:\s+(?:service|agent|pod)s?)?\b"),
     re.compile(r"\breviews?\s+(?:the\s+)?(?:(?:service|agent)\s+)?logs?\b"),
@@ -157,7 +193,7 @@ _LOG_RES = (
 )
 _LOG_WORD = re.compile(r"\blogs?\b")
 _LOG_SIGNAL = re.compile(r"\b(?:bug|bugs|loi|error|errors|exception|exceptions|issue|issues)\b")
-_SEQUENCE = re.compile(r"\b(?:roi|sau do|tiep theo|then|and then|and|va)\b")
+_SEQUENCE = re.compile(r"(?:\b(?:roi|sau do|tiep theo|then|and then|and|va)\b|&)")
 _PURPOSE = re.compile(r"\b(?:de|cho|for|to)\b")
 # Explicit cancellation in front of an intent. A trailing "không" in
 # "có lỗi không" is a question particle and is not listed here.
@@ -166,15 +202,83 @@ _NEGATION_BEFORE = re.compile(
     r"\bdung nen\b|\bdung\b|\bdon'?t\b|\bdo not\b|\bno need(?: to)?\b|"
     r"\bskip\b|\bwithout\b|\bbo qua\b)\s*$"
 )
-_EXPLICIT_AGENT = re.compile(r"@(?:\"|\b)(?:agent-)?(?:tier-(?:haiku|opus)|explore)\b", re.IGNORECASE)
+_EXPLICIT_AGENT = re.compile(
+    r"@(?:\"|\b)(?:agent-)?(?:tier-(?:haiku-release|haiku|opus)|explore)\b",
+    re.IGNORECASE,
+)
+
+class _Stage:
+    """One routing stage. The hint line is the only sentence the hook renders for it."""
+
+    def __init__(self, agent: str, model: str | None, hint_on_main: bool, line: str) -> None:
+        self.agent = agent
+        self.model = model
+        self.hint_on_main = hint_on_main
+        self.line = line
+
+
+# model is None when the stage stays on the configured main session.
+_STAGES = {
+    "plan": _Stage(
+        "tier-opus",
+        "opus",
+        False,
+        "- plan -> `tier-opus`",
+    ),
+    "log": _Stage(
+        "tier-haiku",
+        "haiku",
+        False,
+        "- log -> `tier-haiku` fetches the log lines through MCP and returns those lines only. "
+        "If no MCP tool can return those logs, it stops and does not guess lines; "
+        "analyze them and decide whether to continue on the main {label} session. "
+        "Do not leave the conclusion to the subagent. "
+        "If that analysis finds no error, stop there.",
+    ),
+    "implement": _Stage(
+        "main",
+        None,
+        False,
+        "- implement -> handle directly on the main {label} session (do NOT spawn a subagent)",
+    ),
+    "review": _Stage(
+        "main",
+        None,
+        False,
+        "- review -> handle directly on the main {label} session (do NOT spawn a subagent)",
+    ),
+    "commit": _Stage(
+        "tier-haiku-release",
+        "haiku",
+        False,
+        "- commit -> `tier-haiku-release` commits the named paths. "
+        "Write the commit message on the main session and pass it with those paths. "
+        "If the paths are missing, the subagent stops.",
+    ),
+    "pr": _Stage(
+        "main",
+        None,
+        True,
+        "- pr -> open the pull request on the main {label} session (do NOT spawn a subagent)",
+    ),
+    "bump": _Stage(
+        "tier-haiku-release",
+        "haiku",
+        False,
+        "- bump -> `tier-haiku-release` changes the named image tag. "
+        "If the tag or the file is missing, it stops.",
+    ),
+    "default": _Stage(
+        "main",
+        None,
+        False,
+        "- default -> handle directly on the main {label} session (do NOT spawn a subagent)",
+    ),
+}
+
 
 def _stage_table(label: str) -> str:
-    return (
-        "- planning -> `tier-opus` subagent\n"
-        f"- log fetch -> `tier-haiku` returns the lines only; the main {label} session analyzes them and decides\n"
-        f"- implementation, review, and re-review -> directly on the main {label} session (do NOT spawn a subagent)\n"
-        "- PR, merge, and image-tag bump -> `tier-haiku` subagent"
-    )
+    return "\n".join(_STAGES[name].line.format(label=label) for name in _SIGNAL_ORDER)
 
 
 def fold(text: str) -> str:
@@ -182,6 +286,32 @@ def fold(text: str) -> str:
     lowered = text.lower().replace("đ", "d")
     decomposed = unicodedata.normalize("NFD", lowered)
     return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+
+
+def _commit_cue(before: str) -> bool:
+    """True when a cue sits immediately before commit, on a word boundary."""
+    if before == "":
+        return True
+    for cue in _COMMIT_CUES:
+        if not before.endswith(cue):
+            continue
+        head = before[: -len(cue)]
+        if head == "" or not head[-1].isalnum():
+            return True
+    return False
+
+
+def _commit_spans(text: str) -> list[tuple[int, int]]:
+    """Return spans of the word commit when the nearby words ask for a commit."""
+    spans = []
+    for match in _COMMIT_WORD.finditer(text):
+        after = text[match.end() :]
+        if _COMMIT_BLOCKED_AFTER.match(after):
+            continue
+        before = text[: match.start()]
+        if _commit_cue(before) or _COMMIT_SUFFIX.match(after):
+            spans.append((match.start(), match.end()))
+    return spans
 
 
 def _spans(pattern: re.Pattern[str], text: str) -> list[tuple[int, int]]:
@@ -226,7 +356,9 @@ def _signals(text: str) -> dict[str, list[tuple[int, int]]]:
         "log": log,
         "implement": implement,
         "review": _live(text, review),
+        "commit": _live(text, _commit_spans(text)),
         "pr": _live(text, [span for pattern in _PR_RES for span in _spans(pattern, text)]),
+        "bump": _live(text, [span for pattern in _BUMP_RES for span in _spans(pattern, text)]),
     }
     return {name: spans for name, spans in found.items() if spans}
 
@@ -251,21 +383,34 @@ def _drop_plan_subjects(text: str, signals: dict[str, list[tuple[int, int]]]) ->
     return trimmed
 
 
-def _ordered_names(signals: dict[str, list[tuple[int, int]]]) -> list[str]:
-    return sorted(
+def _ordered_names(text: str, signals: dict[str, list[tuple[int, int]]]) -> list[str]:
+    """Text order, except a fix joined to a review by '&' or 'and' runs first."""
+    names = sorted(
         signals,
         key=lambda name: (min(start for start, _ in signals[name]), _SIGNAL_ORDER.index(name)),
     )
+    if "implement" not in names or "review" not in names:
+        return names
+    if names.index("implement") < names.index("review"):
+        return names
+    review_end = min(end for _, end in signals["review"])
+    impl_start = min(start for start, _ in signals["implement"])
+    if impl_start <= review_end or _ORDERED_SEQUENCE.search(text[review_end:impl_start]):
+        return names
+    impl_at = names.index("implement")
+    review_at = names.index("review")
+    names[impl_at], names[review_at] = names[review_at], names[impl_at]
+    return names
 
 
-def _has_sequence_between(text: str, signals: dict[str, list[tuple[int, int]]], names: list[str]) -> bool:
-    if len(names) < 2:
-        return False
-    first_end = min(end for _, end in signals[names[0]])
-    last_start = max(start for start, _ in signals[names[-1]])
-    if last_start <= first_end:
-        return False
-    return _SEQUENCE.search(text[first_end:last_start]) is not None
+def _has_sequence_between(text: str, signals: dict[str, list[tuple[int, int]]]) -> bool:
+    """A connector between any two signal spans makes one pipeline."""
+    spans = [span for group in signals.values() for span in group]
+    for _, end in spans:
+        for start, _ in spans:
+            if start > end and _SEQUENCE.search(text[end:start]):
+                return True
+    return False
 
 
 def _decision(
@@ -285,85 +430,86 @@ def _decision(
     }
 
 
-_STAGE_AGENT = {
-    "plan": "tier-opus",
-    "log": "tier-haiku",
-    "implement": "main",
-    "review": "main",
-    "pr": "tier-haiku",
-}
-
-
 def _stage_list(names: list[str]) -> list[dict]:
-    return [{"stage": name, "agent": _STAGE_AGENT[name]} for name in names]
+    """Place the release commit immediately before the pull request."""
+    ordered = list(names)
+    if "pr" in ordered and "commit" not in ordered and any(name in ordered for name in ("implement", "review")):
+        ordered.insert(ordered.index("pr"), "commit")
+    return [{"stage": name, "agent": _STAGES[name].agent} for name in ordered]
+
+
+def _one(main: str, names: list[str]) -> dict:
+    name = names[0]
+    spec = _STAGES[name]
+    rule = "log-check" if name == "log" else name
+    return _decision(rule, spec.model or main, names, _stage_list(names), spec.agent)
 
 
 def classify(task: str) -> dict:
     text = fold(task)
     signals = _drop_plan_subjects(text, _signals(text))
-    names = _ordered_names(signals)
+    names = _ordered_names(text, signals)
     main = load_config()["mainModel"]
 
-    if set(names) and set(names).issubset({"implement", "review"}):
+    if not names:
+        spec = _STAGES["default"]
+        return _decision("default", main, names, [{"stage": "default", "agent": spec.agent}], spec.agent)
+    if set(names).issubset({"implement", "review"}):
         rule = "fix-and-review" if len(names) == 2 else names[0]
         return _decision(rule, main, names, _stage_list(names), "main")
-    if len(names) > 1 and _has_sequence_between(text, signals, names):
+    if len(names) > 1 and _has_sequence_between(text, signals):
         return _decision("split", None, names, _stage_list(names), None)
     if len(names) > 1:
         return _decision("confirm", None, names, None, None)
-    if names == ["plan"]:
-        return _decision("plan", "opus", names, [{"stage": "plan", "agent": "tier-opus"}], "tier-opus")
-    if names == ["log"]:
-        return _decision("log-check", "haiku", names, [{"stage": "log", "agent": "tier-haiku"}], "tier-haiku")
-    if names == ["pr"]:
-        return _decision("pr-or-bump", "haiku", names, [{"stage": "pr", "agent": "tier-haiku"}], "tier-haiku")
-    return _decision("default", main, names, [{"stage": "default", "agent": "main"}], "main")
+    return _one(main, names)
 
 
 def _format_stage(stage: dict, label: str) -> str:
-    if stage["stage"] == "log":
-        return (
-            "- log -> `tier-haiku` returns the log lines only; "
-            f"analyze them and decide whether to continue on the main {label} session"
+    return _STAGES[stage["stage"]].line.format(label=label)
+
+
+def _needs_hint(stages: list[dict]) -> bool:
+    return any(_STAGES[stage["stage"]].hint_on_main or _STAGES[stage["stage"]].agent != "main" for stage in stages)
+
+
+def _pr_followup(task: str, stages: list[dict]) -> str:
+    """Sentences that apply to the pull request, once, after the stage lines."""
+    names = {stage["stage"] for stage in stages}
+    if "pr" not in names:
+        return ""
+    text = "Do not create the git commit on the main session. "
+    if "commit" not in names:
+        text += (
+            "If the changes are not committed yet, spawn `tier-haiku-release` to commit the reviewed paths first. "
+            "Write the commit message on the main session and pass it with those paths. "
+            "If the paths are missing, the subagent stops. "
         )
-    if stage["agent"] == "main":
-        return f"- {stage['stage']} -> handle directly on the main {label} session (do NOT spawn a subagent)"
-    return f"- {stage['stage']} -> `{stage['agent']}`"
+    if names.intersection({"implement", "review"}):
+        text += "Open the pull request only after review and the fix are OK when the prompt asks for a review. "
+    if _MERGE_WORD.search(fold(task)):
+        text += "The prompt asks to merge. Merge from the main session after the pull request is open. "
+    return text
+
+
+def _hint(task: str, decision: dict, label: str) -> str:
+    stages = decision["stages"]
+    lines = "\n".join(_format_stage(stage, label) for stage in stages)
+    return (
+        "Orchestrator hint only. Run each stage in order:\n"
+        f"{lines}\n"
+        f"Do `implement`, `review`, re-review, and the pull request directly on the main {label} session in this same context. "
+        "Codebase search may use `Explore`. "
+        f"{_pr_followup(task, stages)}"
+        "Respect conditional gates in the prompt (e.g., 'nếu có issues', 'ok thì'). "
+        "If review finds issues, fix and re-review on the main session before the commit and the pull request. "
+        "An explicit @-mention overrides this hint."
+    )
 
 
 def hook_payload(task: str) -> dict | None:
     decision = classify(task)
-    if decision["agent"] == "main":
-        # The main session is already the configured model. Do not inject extra tokens.
-        return None
     label = model_label(load_config()["mainModel"])
-    if decision["rule"] == "split":
-        lines = "\n".join(_format_stage(stage, label) for stage in decision["stages"])
-        log_decision = ""
-        if any(stage["stage"] == "log" for stage in decision["stages"]):
-            log_decision = (
-                f"`tier-haiku` only fetches log lines. The main {label} session analyzes those lines and decides whether there is an error. "
-                "If that analysis finds no error, stop there. "
-            )
-        context = (
-            "Orchestrator hint only. Run each stage in order:\n"
-            f"{lines}\n"
-            f"Do `implement`, `review`, and any re-review directly on the main {label} session in this same context "
-            "instead of spawning a subagent. Only spawn subagents for `tier-opus` and `tier-haiku` stages. "
-            f"{log_decision}"
-            "Respect conditional gates in the prompt (e.g., 'nếu có issues', 'ok thì'). "
-            "If review finds issues, fix and re-review on the main session before moving to the release stage. "
-            "An explicit @-mention overrides this hint."
-        )
-    elif decision["rule"] == "log-check":
-        context = (
-            "Orchestrator hint only. This looks like one log-check stage. "
-            "Spawn `tier-haiku` (model: haiku) only to fetch the log lines. "
-            f"Analyze those lines and decide what they mean on the main {label} session. "
-            "Do not leave the conclusion to the subagent. "
-            "An explicit @-mention overrides this hint."
-        )
-    elif decision["rule"] == "confirm":
+    if decision["rule"] == "confirm":
         noticed = ", ".join(decision["signals"]) or "none"
         context = (
             "Orchestrator hint only. This sentence is ambiguous. "
@@ -374,12 +520,10 @@ def hook_payload(task: str) -> dict | None:
             f"{_stage_table(label)}\n"
             "An explicit @-mention overrides this hint."
         )
+    elif not _needs_hint(decision["stages"] or []):
+        return None
     else:
-        context = (
-            f"Orchestrator hint only. This looks like one {decision['rule']} stage. "
-            f"Delegate it to `{decision['agent']}` (model: {decision['model']}) and do the work in that subagent. "
-            "An explicit @-mention overrides this hint."
-        )
+        context = _hint(task, decision, label)
     return {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
