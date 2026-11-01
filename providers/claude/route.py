@@ -291,6 +291,17 @@ _STAGES = {
         "- bump -> `tier-haiku-release` changes the named image tag. "
         "If the tag or the file is missing, it stops.",
     ),
+    # `pr` and `bump` in one call. Reached from _stage_list, never from a
+    # signal of its own, so it stays out of _SIGNAL_ORDER.
+    "release": _Stage(
+        "tier-haiku-release",
+        "haiku",
+        "- release -> `tier-haiku-release` commits, pushes, opens the pull request, "
+        "and bumps the named image tag in ONE call (do not spawn it twice). "
+        "Write the commit message and the pull request title and body on the main {label} session "
+        "and pass them with the exact paths and the tag. "
+        "If the tag or the file is missing, it stops after the pull request and says so.",
+    ),
     "default": _Stage(
         "main",
         None,
@@ -466,17 +477,31 @@ def _decision(
     }
 
 
-def _stage_list(names: list[str]) -> list[dict]:
-    """The `pr` stage already covers the commit, so drop a duplicate commit."""
+def _stage_list(names: list[str], merge_requested: bool) -> list[dict]:
+    """Fold what one `tier-haiku-release` call can do into one stage.
+
+    The `pr` stage already covers the commit, so a duplicate commit goes.
+    `pr` followed straight by `bump` is one call, which saves a spawn. A
+    requested merge keeps them apart: the image is built from the merged
+    commit, so a tag moved before the merge points at nothing.
+    """
     ordered = [name for name in names if not (name == "commit" and "pr" in names)]
+    if (
+        not merge_requested
+        and "pr" in ordered
+        and "bump" in ordered
+        and ordered.index("bump") == ordered.index("pr") + 1
+    ):
+        at = ordered.index("pr")
+        ordered[at : at + 2] = ["release"]
     return [{"stage": name, "agent": _STAGES[name].agent} for name in ordered]
 
 
-def _one(main: str, names: list[str]) -> dict:
+def _one(main: str, names: list[str], merge_requested: bool) -> dict:
     name = names[0]
     spec = _STAGES[name]
     rule = "log-check" if name == "log" else name
-    return _decision(rule, spec.model or main, names, _stage_list(names), spec.agent)
+    return _decision(rule, spec.model or main, names, _stage_list(names, merge_requested), spec.agent)
 
 
 def classify(task: str) -> dict:
@@ -484,18 +509,19 @@ def classify(task: str) -> dict:
     signals = _drop_plan_subjects(text, _signals(text))
     names = _ordered_names(text, signals)
     main = load_config()["mainModel"]
+    merge = _merge_requested(text)
 
     if not names:
         spec = _STAGES["default"]
         return _decision("default", main, names, [{"stage": "default", "agent": spec.agent}], spec.agent)
     if set(names).issubset({"implement", "review"}):
         rule = "fix-and-review" if len(names) == 2 else names[0]
-        return _decision(rule, main, names, _stage_list(names), "main")
+        return _decision(rule, main, names, _stage_list(names, merge), "main")
     if len(names) > 1 and _has_sequence_between(text, signals):
-        return _decision("split", None, names, _stage_list(names), None)
+        return _decision("split", None, names, _stage_list(names, merge), None)
     if len(names) > 1:
         return _decision("confirm", None, names, None, None)
-    return _one(main, names)
+    return _one(main, names, merge)
 
 
 def _format_stage(stage: dict, label: str) -> str:
@@ -510,6 +536,8 @@ def _needs_hint(stages: list[dict]) -> bool:
 def _pr_followup(task: str, stages: list[dict]) -> str:
     """Sentences that apply to the pull request, once, after the stage lines."""
     names = {stage["stage"] for stage in stages}
+    if "release" in names:
+        names |= {"pr", "bump"}
     if "pr" not in names:
         return ""
     text = (

@@ -16,6 +16,7 @@ The main session runs on `opus` with `effortLevel` `high`. Those defaults live i
 | Commit on its own | `tier-haiku-release`, which stops after the commit: no push, no pull request | `haiku` |
 | Merge | `tier-haiku-release`, only when the prompt explicitly asks to merge something | `haiku` |
 | Bump an image tag | `tier-haiku-release` subagent (`tools: Bash, Glob, Grep, Read, Edit`, `effort: medium`, `maxTurns: 25`) | `haiku` |
+| PR and an image-tag bump together | One `tier-haiku-release` call, when the bump follows the PR and no merge was asked for. A requested merge keeps them in two calls, because the image is built from the merged commit | `haiku` |
 | Plan code or plan a feature | `tier-plan` subagent (`effort: high`) | `fable` |
 | Everything else | **Main session directly** | `opus` (`effortLevel: high`) |
 

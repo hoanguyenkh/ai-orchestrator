@@ -116,16 +116,47 @@ class RouteTests(unittest.TestCase):
         self.assertIn("Decide the user's intent before acting", text)
         self.assertIn("Do not add an implement", text)
 
-    def test_make_pr_and_bump_tag_is_two_release_stages(self):
+    def test_make_pr_and_bump_tag_is_one_release_call(self):
         decision = classify("Make Pr & bump image tag")
         self.assertEqual(decision["rule"], "split")
         self.assertIsNone(decision["agent"])
+        self.assertEqual(decision["signals"], ["pr", "bump"])
+        self.assertEqual(
+            decision["stages"],
+            [{"stage": "release", "agent": "tier-haiku-release"}],
+        )
+        text = hook_payload("Make Pr & bump image tag")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("in ONE call (do not spawn it twice)", text)
+        self.assertNotIn("- bump ->", text)
+        # The release stage still carries the pull request follow-up.
+        self.assertIn("The prompt does not ask to merge, so do not merge.", text)
+
+    def test_a_requested_merge_keeps_the_bump_after_the_pr(self):
+        decision = classify("make PR & merge to main, sau đó bump image tag")
         self.assertEqual(
             decision["stages"],
             [
                 {"stage": "pr", "agent": "tier-haiku-release"},
                 {"stage": "bump", "agent": "tier-haiku-release"},
             ],
+        )
+        text = hook_payload("make PR & merge to main, sau đó bump image tag")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("The prompt asks to merge.", text)
+        self.assertNotIn("- release ->", text)
+        self.assertLess(text.index("- pr ->"), text.index("- bump ->"))
+
+    def test_a_bump_before_the_pr_is_not_folded(self):
+        decision = classify("bump image tag rồi make PR")
+        self.assertEqual(
+            [stage["stage"] for stage in decision["stages"]],
+            ["bump", "pr"],
+        )
+
+    def test_a_bump_separated_from_the_pr_is_not_folded(self):
+        decision = classify("make PR rồi fix the retry handler rồi bump image tag")
+        self.assertEqual(
+            [stage["stage"] for stage in decision["stages"]],
+            ["pr", "implement", "bump"],
         )
 
     def test_git_commit_is_haiku(self):
@@ -517,8 +548,9 @@ class RouteTests(unittest.TestCase):
             front = (root / f"{spec.agent}.md").read_text(encoding="utf-8").split("---")[1]
             self.assertIn(f"\nmodel: {spec.model}\n", front, f"{name} -> {spec.agent}")
             checked += 1
-        # plan, log, commit, pr, bump: commit/pr/bump share tier-haiku-release.
-        self.assertEqual(checked, 5)
+        # plan, log, commit, pr, bump, release: the last four share
+        # tier-haiku-release.
+        self.assertEqual(checked, 6)
 
     def test_plan_runs_on_fable_at_high_effort(self):
         decision = classify("lên plan cho feature X")

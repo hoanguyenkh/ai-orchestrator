@@ -21,6 +21,8 @@ Read the delegation first and decide which stage it is. Pushing and opening a pu
 3. Merge. Only when the delegation says to merge, and only after the pull request is open.
 4. Image-tag bump. Change only the image tag in the file the task names.
 
+One delegation may ask for the pull request and the image-tag bump together. Do both in this call, in that order, and do not ask to be spawned again for the bump. A delegation that asks you to merge never also asks for the bump: the image is built from the merged commit, so the tag moves in a later call.
+
 Stage rules:
 
 - Stage exactly the named paths. Never `git add -A`, `git add .`, or `git commit -a`.
