@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from route import (
     classify,
+    context_tokens,
     hook_payload,
     install_hook,
     load_config,
@@ -664,6 +665,113 @@ def _tool_result(is_error=False):
 
 def _result(is_error=False):
     return {"type": "result", "subtype": "success", "is_error": is_error, "result": "ready"}
+
+
+class LogIntentWithoutTheWordTests(unittest.TestCase):
+    """A prompt about something that runs, that never says "log"."""
+
+    def test_error_report_with_a_check_verb_is_ambiguous(self):
+        decision = classify("gần đây tôi thấy lỗi trên robinhood  nữa check xem")
+        self.assertEqual(decision["rule"], "log-maybe")
+
+    def test_review_of_running_agents_is_ambiguous(self):
+        decision = classify("review 8 agent trong vòng 6 cycle gần nhất xem, buy, sell, hold ok hơn chưa?")
+        self.assertEqual(decision["rule"], "log-maybe")
+
+    def test_the_hint_names_tier_haiku_and_leaves_the_choice(self):
+        payload = hook_payload("check 4 agent xem có chạy ok không")
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("`tier-haiku`", context)
+        self.assertIn("Decide which it is before acting", context)
+        self.assertNotIn("Run each stage in order", context)
+
+    def test_code_review_is_not_a_log_fetch(self):
+        self.assertEqual(classify("review lại code này")["rule"], "review")
+
+    def test_a_question_about_the_pull_request_is_not_a_log_fetch(self):
+        self.assertEqual(classify("pr này good đúng ko?")["rule"], "default")
+
+    def test_refactor_of_a_source_file_is_not_a_log_fetch(self):
+        self.assertEqual(classify("update agent.md và refactor hardcode nha")["rule"], "default")
+
+    def test_a_spelled_out_log_fetch_still_routes_instead_of_asking(self):
+        self.assertEqual(classify("check log 4 agent")["rule"], "log-check")
+
+    def test_a_fix_request_is_not_downgraded_to_a_question(self):
+        self.assertEqual(classify("fix rồi check xem ok chưa")["rule"], "implement")
+
+
+class ContextSizeTests(unittest.TestCase):
+    """The hook reads the transcript so a hint can say what a spawn saves."""
+
+    def _transcript(self, directory, usage):
+        path = Path(directory) / "transcript.jsonl"
+        lines = [json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}})]
+        if usage is not None:
+            lines.append(json.dumps({"type": "assistant", "message": {"role": "assistant", "usage": usage}}))
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def test_reads_the_last_usage_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._transcript(directory, {
+                "input_tokens": 2,
+                "cache_read_input_tokens": 390_000,
+                "cache_creation_input_tokens": 8_000,
+            })
+            self.assertEqual(context_tokens(path), 398_002)
+
+    def test_a_transcript_with_no_usage_is_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(context_tokens(self._transcript(directory, None)))
+
+    def test_a_missing_transcript_is_unknown(self):
+        self.assertIsNone(context_tokens(Path("/nonexistent/transcript.jsonl")))
+
+    def test_only_the_tail_is_read_for_a_large_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "big.jsonl"
+            filler = json.dumps({"type": "user", "message": {"role": "user", "content": "x" * 400}})
+            stale = json.dumps({"type": "assistant", "message": {"role": "assistant", "usage": {"input_tokens": 11}}})
+            fresh = json.dumps({"type": "assistant", "message": {"role": "assistant", "usage": {"cache_read_input_tokens": 222_000}}})
+            path.write_text("\n".join([stale] + [filler] * 2000 + [fresh]) + "\n", encoding="utf-8")
+            self.assertEqual(context_tokens(path), 222_000)
+
+    def test_a_large_context_says_the_spawn_is_worth_it(self):
+        payload = hook_payload("bump image agent to f7db740", 398_000)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("398,000 tokens", context)
+        self.assertIn("stops paying that", context)
+
+    def test_a_small_context_still_keeps_the_release_stage(self):
+        payload = hook_payload("bump image agent to f7db740", 12_000)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("12,000 tokens", context)
+        self.assertIn("saves little context", context)
+        self.assertIn("still goes to `tier-haiku-release`", context)
+
+    def test_a_log_only_hint_does_not_mention_the_release_stage(self):
+        payload = hook_payload("check log 4 agent", 9_000)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("saves little context", context)
+        self.assertNotIn("still goes to `tier-haiku-release`", context)
+
+    def test_an_unmeasured_context_adds_nothing(self):
+        payload = hook_payload("bump image agent to f7db740")
+        self.assertNotIn("tokens per request", payload["hookSpecificOutput"]["additionalContext"])
+
+    def test_a_plan_hint_carries_no_context_note(self):
+        payload = hook_payload("lên plan cho feature auth", 398_000)
+        self.assertNotIn("398,000", payload["hookSpecificOutput"]["additionalContext"])
+
+
+class ReleaseWithoutAHintTests(unittest.TestCase):
+    def test_the_skill_delegates_release_work_with_no_hint(self):
+        raw = (Path(__file__).resolve().parent / "skill" / "SKILL.md").read_text(encoding="utf-8")
+        opus = render_text(raw, "opus", "high")
+        self.assertIn("Release work is the exception, and it does not wait for a hint", opus)
+        self.assertIn("whether or not this conversation has a hint", opus)
+        self.assertNotIn("{{", opus)
 
 
 class SmokeEvaluationTests(unittest.TestCase):

@@ -24,6 +24,12 @@ The main session runs on `opus` with `effortLevel` `high`. Those defaults live i
 
 When a prompt only asks for main-session work (fix, implement, improve, review, re-review), the `UserPromptSubmit` hook stays silent and the main Opus session handles it immediately. When a prompt needs Haiku, a plan, or multiple stages, the hook injects a routing hint so the main session delegates those stages and keeps the code and the review on itself.
 
+Three things do not depend on the prompt wording:
+
+- **Release work never waits for a hint.** The hook reads only the user's prompt, so it cannot see the commit the main session decides to make partway through a turn: "sửa luôn" produces no hint, and the commit, the push and the pull request would then stay on Opus. The skill therefore sends every commit, push, pull request and image-tag move to `tier-haiku-release` whatever the hook said. The main session still writes the message, the title and the body, and passes the exact paths and the diff summary it already has.
+- **A prompt that never says `log` can still be a log fetch.** "check xem lỗi trên robinhood" and "review 8 agent trong 6 cycle" used to fall through to the main session silently, which is how raw log lines end up in the Opus context and stay there. Those now get an ambiguity hint (`log-maybe`) naming `tier-haiku`; the main session decides, because only it can tell a running-service question from a question about the code. A source-level word (`code`, `pr`, `diff`, `file`, `test`, `refactor`, ...) rules the prompt out, so a code review is never mistaken for a log fetch.
+- **The hint says what a spawn actually saves.** The hook reads `transcript_path` from its own payload and takes the tokens of the last usage record, which is what every further main-session request re-reads. Above `_CONTEXT_FLOOR` (150k) the hint says the spawn is worth it; below it the hint says delegating saves little context, except for a release stage, which goes to `tier-haiku-release` for its staging rules regardless. Reading the tail of a 5.5 MB transcript costs about 1 ms, and the whole hook stays at roughly 26 ms.
+
 Install or update (backs up existing files under `~/.claude/orchestrator-backups/<timestamp>/`):
 
 ```bash

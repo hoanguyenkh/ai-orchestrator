@@ -233,6 +233,30 @@ _EXPLICIT_AGENT = re.compile(
     r"@(?:\"|\b)(?:agent-)?(?:tier-(?:haiku-release|haiku|plan)|explore)\b",
     re.IGNORECASE,
 )
+# A target that is inspected by reading what it emitted, not its source.
+_RUNTIME_TARGET = re.compile(
+    r"\b(?:agents?|services?|pods?|cycles?|deployments?|jobs?|workers?|containers?)\b"
+)
+_INSPECT_VERB = re.compile(
+    r"\b(?:check|kiem tra|xem|coi|reviews?|reviewing|theo doi|monitor|debug)\b"
+)
+# Source-level words mean the prompt is about the code, not about a running
+# thing, so an inspect verb next to one of these is never a log fetch.
+_SOURCE_WORD = re.compile(
+    r"\b(?:code|codes|pr|prs|pull request|diff|function|functions|file|files|"
+    r"test|tests|hardcode|refactor|schema|readme|docs?|skill|md)\b"
+)
+# Tokens the main session re-reads per request before a delegated stage is
+# worth its spawn. Below it the round trips cost more than the context saved.
+_CONTEXT_FLOOR = 150_000
+# Enough of the transcript tail to hold the last usage record of a long
+# session, where single records run to a few kilobytes.
+_CONTEXT_TAIL_BYTES = 262_144
+# Stages whose whole saving is escaping the accumulated context.
+_MECHANICAL_STAGES = frozenset({"commit", "pr", "bump", "release", "log"})
+# Of those, the ones `tier-haiku-release` takes for its staging rules alone,
+# whatever the context costs.
+_RELEASE_STAGES = frozenset({"commit", "pr", "bump", "release"})
 
 class _Stage:
     """One routing stage. The hint line is the only sentence the hook renders for it."""
@@ -410,6 +434,26 @@ def _signals(text: str) -> dict[str, list[tuple[int, int]]]:
     return {name: spans for name, spans in found.items() if spans}
 
 
+def _log_maybe(text: str, names: list[str]) -> bool:
+    """True when the prompt reads like a log fetch that never says "log".
+
+    `_LOG_RES` needs the word itself, so "check xem lỗi trên robinhood" and
+    "review 8 agent trong 6 cycle" fall through to the main session with no
+    hint at all. Those are the prompts that pull the log lines into the Opus
+    context and keep them there. This does not route them: it only marks the
+    prompt as ambiguous so the main session decides with the full context.
+
+    Only a prompt the classifier would otherwise send straight to the main
+    session qualifies, and a source-level word disqualifies it, so a code
+    review is never mistaken for a log fetch.
+    """
+    if names not in ([], ["review"]):
+        return False
+    if _SOURCE_WORD.search(text) or not _INSPECT_VERB.search(text):
+        return False
+    return bool(_RUNTIME_TARGET.search(text) or _LOG_SIGNAL.search(text))
+
+
 def _drop_plan_subjects(text: str, signals: dict[str, list[tuple[int, int]]]) -> dict[str, list[tuple[int, int]]]:
     """Drop spans after 'plan' that are attached with 'để/cho/for/to' and no sequence word."""
     if "plan" not in signals or len(signals) < 2:
@@ -511,6 +555,8 @@ def classify(task: str) -> dict:
     main = load_config()["mainModel"]
     merge = _merge_requested(text)
 
+    if _log_maybe(text, names):
+        return _decision("log-maybe", None, names, None, None)
     if not names:
         spec = _STAGES["default"]
         return _decision("default", main, names, [{"stage": "default", "agent": spec.agent}], spec.agent)
@@ -553,7 +599,67 @@ def _pr_followup(task: str, stages: list[dict]) -> str:
     return text
 
 
-def _hint(task: str, decision: dict, label: str) -> str:
+def context_tokens(transcript_path: Path) -> int | None:
+    """Tokens the main session re-reads per request, from the transcript tail.
+
+    The hook payload carries `transcript_path`. The last usage record in it
+    gives what every further main-session request already pays, which is what
+    a delegated stage stops paying. None when the file cannot be read.
+    """
+    try:
+        size = transcript_path.stat().st_size
+        with transcript_path.open("rb") as handle:
+            if size > _CONTEXT_TAIL_BYTES:
+                handle.seek(size - _CONTEXT_TAIL_BYTES)
+                handle.readline()
+            tail = handle.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        if '"usage"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = event.get("message")
+        usage = message.get("usage") if isinstance(message, dict) else None
+        if not isinstance(usage, dict):
+            continue
+        total = sum(
+            usage.get(key) or 0
+            for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+        )
+        if total:
+            return total
+    return None
+
+
+def _context_note(tokens: int | None, stages: list[dict]) -> str:
+    """What the accumulated context costs the mechanical stages in this hint."""
+    names = {stage["stage"] for stage in stages}
+    if tokens is None or not names.intersection(_MECHANICAL_STAGES):
+        return ""
+    if tokens >= _CONTEXT_FLOOR:
+        return (
+            f"The main session now re-reads about {tokens:,} tokens on every request. "
+            "A delegated stage starts clean and stops paying that, so the spawn is worth "
+            "it here. "
+        )
+    note = (
+        f"The main session re-reads only about {tokens:,} tokens per request, so a spawn "
+        "saves little context: keep a stage here when delegating would cost more round "
+        "trips than it saves. "
+    )
+    if names.intersection(_RELEASE_STAGES):
+        note += (
+            "The release stage is the exception and still goes to `tier-haiku-release`, "
+            "whose staging rules are the reason for it. "
+        )
+    return note
+
+
+def _hint(task: str, decision: dict, label: str, tokens: int | None = None) -> str:
     stages = decision["stages"]
     lines = "\n".join(_format_stage(stage, label) for stage in stages)
     return (
@@ -561,6 +667,7 @@ def _hint(task: str, decision: dict, label: str) -> str:
         f"{lines}\n"
         f"Do `implement`, `review`, and re-review directly on the main {label} session in this same context. "
         "Codebase search may use `Explore`. "
+        f"{_context_note(tokens, stages)}"
         f"{_pr_followup(task, stages)}"
         "Respect conditional gates in the prompt (e.g., 'nếu có issues', 'ok thì'). "
         "If review finds issues, fix and re-review on the main session before the release stage. "
@@ -568,10 +675,20 @@ def _hint(task: str, decision: dict, label: str) -> str:
     )
 
 
-def hook_payload(task: str) -> dict | None:
+def hook_payload(task: str, tokens: int | None = None) -> dict | None:
     decision = classify(task)
     label = model_label(load_config()["mainModel"])
-    if decision["rule"] == "confirm":
+    if decision["rule"] == "log-maybe":
+        context = (
+            "Orchestrator hint only. This prompt does not say `log`, but it asks about "
+            "something that runs, so it may need the log lines. Decide which it is before "
+            "acting. If you are about to read logs, pods, or a service's output, delegate "
+            "that fetch to `tier-haiku` and analyze the lines it returns on the main "
+            f"{label} session. If the prompt is about the code, handle it here and ignore "
+            "this hint. Do not add a stage the prompt did not ask for. "
+            "An explicit @-mention overrides this hint."
+        )
+    elif decision["rule"] == "confirm":
         noticed = ", ".join(decision["signals"]) or "none"
         context = (
             "Orchestrator hint only. This sentence is ambiguous. "
@@ -586,7 +703,7 @@ def hook_payload(task: str) -> dict | None:
     elif not _needs_hint(decision["stages"] or []):
         return None
     else:
-        context = _hint(task, decision, label)
+        context = _hint(task, decision, label, tokens)
     return {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
@@ -651,7 +768,9 @@ def _hook_main() -> int:
     stripped = prompt.strip()
     if not stripped or stripped.startswith("/") or _EXPLICIT_AGENT.search(stripped):
         return 0
-    out = hook_payload(stripped)
+    transcript = payload.get("transcript_path")
+    tokens = context_tokens(Path(transcript)) if isinstance(transcript, str) and transcript else None
+    out = hook_payload(stripped, tokens)
     if out is None:
         return 0
     json.dump(out, sys.stdout, ensure_ascii=False)
