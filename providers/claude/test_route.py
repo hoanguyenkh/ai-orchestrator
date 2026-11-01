@@ -350,7 +350,7 @@ class RouteTests(unittest.TestCase):
             "tier-haiku.md": "haiku",
             "tier-haiku-release.md": "haiku",
             "tier-opus.md": "opus",
-            "Explore.md": "haiku",
+            "Explore.md": "sonnet",
         }
         self.assertFalse((root / "tier-sonnet.md").exists())
         for name, alias in expected.items():
@@ -363,10 +363,6 @@ class RouteTests(unittest.TestCase):
         self.assertIn("effort: medium\n", haiku_text)
         self.assertIn("maxTurns: 15\n", haiku_text)
         self.assertIn("omitClaudeMd: true\n", haiku_text)
-        explore = (root / "Explore.md").read_text(encoding="utf-8")
-        self.assertIn("effort: medium\n", explore)
-        self.assertIn("tools: Glob, Grep, Read\n", explore)
-        self.assertIn("Cite a line only after you have Read that file.", explore)
 
     def test_other_stays_on_main_opus(self):
         decision = classify("thêm pagination cho orders endpoint")
@@ -491,7 +487,7 @@ class RouteTests(unittest.TestCase):
             self.assertTrue(command.startswith("'"))
             self.assertEqual(saved["model"], "opus")
             self.assertEqual(saved["effortLevel"], "high")
-            self.assertEqual(saved["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "haiku")
+            self.assertEqual(saved["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "opus")
             orch = json.loads((root / "orchestrator.json").read_text(encoding="utf-8"))
             self.assertEqual(orch["mainModel"], "opus")
             self.assertEqual(orch["mainEffort"], "high")
@@ -505,7 +501,17 @@ class RouteTests(unittest.TestCase):
         cfg = load_config()
         self.assertEqual(cfg["mainModel"], "opus")
         self.assertEqual(cfg["mainEffort"], "high")
-        self.assertEqual(cfg["subagentModel"], "haiku")
+        # Not haiku: an agent file that pins no model of its own must not land
+        # on Haiku without saying so.
+        self.assertEqual(cfg["subagentModel"], "opus")
+
+    def test_every_agent_pins_its_own_model(self):
+        root = Path(__file__).resolve().parent / "agents"
+        files = sorted(path.name for path in root.glob("*.md"))
+        self.assertEqual(files, ["Explore.md", "tier-haiku-release.md", "tier-haiku.md", "tier-opus.md"])
+        for name in files:
+            front = (root / name).read_text(encoding="utf-8").split("---")[1]
+            self.assertRegex(front, r"\nmodel: (?:haiku|sonnet|opus)\n", name)
 
     def test_install_hook_can_pin_sonnet(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -566,7 +572,20 @@ class RouteTests(unittest.TestCase):
             rendered = render_text((root / name).read_text(encoding="utf-8"), "opus", "high")
             self.assertNotIn("{{", rendered)
             self.assertIn("Opus", rendered)
-            self.assertNotIn("Sonnet", rendered)
+        # A leftover "Sonnet" would mean an unrendered {{Main}} or a stale
+        # tier-sonnet reference. Explore names Sonnet as its own pinned model.
+        for name in ("tier-opus.md", "tier-haiku.md", "tier-haiku-release.md"):
+            rendered = render_text((root / name).read_text(encoding="utf-8"), "opus", "high")
+            self.assertNotIn("Sonnet", rendered, name)
+
+    def test_explore_searches_on_sonnet_at_high_effort(self):
+        explore = (Path(__file__).resolve().parent / "agents" / "Explore.md").read_text(encoding="utf-8")
+        self.assertIn("model: sonnet\n", explore)
+        self.assertIn("effort: high\n", explore)
+        self.assertIn("tools: Glob, Grep, Read\n", explore)
+        self.assertIn("Cite a line only after you have Read that file.", explore)
+        self.assertIn("try a second wording before you report nothing", explore)
+        self.assertIn("say the search is incomplete", explore)
 
 
 def _agent_call(model="haiku"):

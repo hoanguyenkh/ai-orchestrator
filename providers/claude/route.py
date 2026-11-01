@@ -10,7 +10,11 @@ only spawned for a different role:
   - commit/push/PR  -> tier-haiku-release (haiku) as one stage; the main
                        session writes the commit message and the PR body
   - image-tag bump  -> tier-haiku-release (haiku)
+  - codebase search -> Explore (sonnet, effort high), read-only
   - implement/review/default -> main session (config mainModel)
+
+Every agent file pins its own model, and subagentModel is Opus so an agent
+that pins none does not silently fall back to Haiku.
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from pathlib import Path
 DEFAULT_CONFIG = {
     "mainModel": "opus",
     "mainEffort": "high",
-    "subagentModel": "haiku",
+    "subagentModel": "opus",
 }
 ALLOWED_MAIN_MODELS = {"opus", "sonnet"}
 ALLOWED_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
