@@ -5,7 +5,7 @@ description: >
   implement, improve, review code, check logs, commit, bump an image tag, or
   open a pull request.
 disallowedTools: Agent
-model: opus
+model: fable
 effort: high
 color: purple
 ---

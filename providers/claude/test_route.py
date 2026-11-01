@@ -349,7 +349,7 @@ class RouteTests(unittest.TestCase):
         expected = {
             "tier-haiku.md": "haiku",
             "tier-haiku-release.md": "haiku",
-            "tier-opus.md": "opus",
+            "tier-opus.md": "fable",
             "Explore.md": "sonnet",
         }
         self.assertFalse((root / "tier-sonnet.md").exists())
@@ -505,13 +505,36 @@ class RouteTests(unittest.TestCase):
         # on Haiku without saying so.
         self.assertEqual(cfg["subagentModel"], "opus")
 
+    def test_stage_models_match_the_agent_files(self):
+        """route.py and the agent frontmatter must name the same model."""
+        from route import _STAGES
+
+        root = Path(__file__).resolve().parent / "agents"
+        checked = 0
+        for name, spec in _STAGES.items():
+            if spec.agent == "main":
+                continue
+            front = (root / f"{spec.agent}.md").read_text(encoding="utf-8").split("---")[1]
+            self.assertIn(f"\nmodel: {spec.model}\n", front, f"{name} -> {spec.agent}")
+            checked += 1
+        # plan, log, commit, pr, bump: commit/pr/bump share tier-haiku-release.
+        self.assertEqual(checked, 5)
+
+    def test_plan_runs_on_fable_at_high_effort(self):
+        decision = classify("lên plan cho feature X")
+        self.assertEqual(decision["agent"], "tier-opus")
+        self.assertEqual(decision["model"], "fable")
+        plan = (Path(__file__).resolve().parent / "agents" / "tier-opus.md").read_text(encoding="utf-8")
+        self.assertIn("model: fable\n", plan)
+        self.assertIn("effort: high\n", plan)
+
     def test_every_agent_pins_its_own_model(self):
         root = Path(__file__).resolve().parent / "agents"
         files = sorted(path.name for path in root.glob("*.md"))
         self.assertEqual(files, ["Explore.md", "tier-haiku-release.md", "tier-haiku.md", "tier-opus.md"])
         for name in files:
             front = (root / name).read_text(encoding="utf-8").split("---")[1]
-            self.assertRegex(front, r"\nmodel: (?:haiku|sonnet|opus)\n", name)
+            self.assertRegex(front, r"\nmodel: (?:haiku|sonnet|opus|fable)\n", name)
 
     def test_install_hook_can_pin_sonnet(self):
         with tempfile.TemporaryDirectory() as directory:

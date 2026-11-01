@@ -5,7 +5,7 @@ The main session model comes from config.json. The default is Opus at high
 effort. `init.sh sonnet` installs Sonnet instead. Implementation, code review,
 and re-review stay on that main session in one shared context. Subagents are
 only spawned for a different role:
-  - plan            -> tier-opus (opus, effort high)
+  - plan            -> tier-opus (fable, effort high)
   - log fetch       -> tier-haiku (haiku); main session analyzes and decides
   - commit/push/PR  -> tier-haiku-release (haiku) as one stage; the main
                        session writes the commit message and the PR body
@@ -247,7 +247,7 @@ class _Stage:
 _STAGES = {
     "plan": _Stage(
         "tier-opus",
-        "opus",
+        "fable",
         "- plan -> `tier-opus`",
     ),
     "log": _Stage(

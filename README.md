@@ -16,7 +16,7 @@ The main session runs on `opus` with `effortLevel` `high`. Those defaults live i
 | Commit on its own | `tier-haiku-release`, which stops after the commit: no push, no pull request | `haiku` |
 | Merge | `tier-haiku-release`, only when the prompt explicitly asks to merge something | `haiku` |
 | Bump an image tag | `tier-haiku-release` subagent (`tools: Bash, Glob, Grep, Read, Edit`, `effort: medium`, `maxTurns: 25`) | `haiku` |
-| Plan code or plan a feature | `tier-opus` subagent (`effort: high`) | `opus` |
+| Plan code or plan a feature | `tier-opus` subagent (`effort: high`) | `fable` |
 | Everything else | **Main session directly** | `opus` (`effortLevel: high`) |
 
 `haiku`, `sonnet`, and `opus` are aliases for the latest model in that family. A new Opus release does not require an edit to the agent files.
