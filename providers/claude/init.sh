@@ -51,7 +51,7 @@ for src in "$ROOT/agents/"*.md; do
   backup_file "$CLAUDE/agents/$name" "agents/$name"
   render "$src" "$CLAUDE/agents/$name"
 done
-rm -f "$CLAUDE/agents/tier-sonnet.md"
+rm -f "$CLAUDE/agents/tier-sonnet.md" "$CLAUDE/agents/tier-opus.md"
 backup_file "$CLAUDE/skills/model-router/SKILL.md" "skills/model-router/SKILL.md"
 backup_file "$HOOK" "hooks/orchestrator-route.py"
 backup_file "$CLAUDE/settings.json" "settings.json"
@@ -69,7 +69,7 @@ else
 fi
 
 echo "Updated Claude Code config in $CLAUDE"
-echo "  agents: tier-haiku, tier-opus, Explore (main/code/review stay on the main session; MCP is inherited)"
+echo "  agents: tier-haiku (logs), tier-haiku-release (commit+push+PR, image tag), tier-plan, Explore (code and review stay on the main session)"
 echo "  skill:  skills/model-router"
 echo "  hook:   UserPromptSubmit -> $HOOK"
 echo "  model:  main session set to $MODEL, effort $EFFORT, default subagent model set to $SUB"
