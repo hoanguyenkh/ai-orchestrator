@@ -761,11 +761,31 @@ class ContextSizeTests(unittest.TestCase):
         self.assertIn("saves little context", context)
         self.assertIn("still goes to `tier-haiku-release`", context)
 
-    def test_a_log_only_hint_does_not_mention_the_release_stage(self):
+    def test_a_small_context_still_delegates_the_log_fetch(self):
         payload = hook_payload("check log 4 agent", 9_000)
         context = payload["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("saves little context", context)
+        self.assertIn("9,000 tokens", context)
+        self.assertIn("still goes to `tier-haiku`", context)
         self.assertNotIn("still goes to `tier-haiku-release`", context)
+
+    def test_a_small_context_never_licenses_keeping_a_stage_here(self):
+        for task in ("check log 4 agent", "bump image agent to f7db740"):
+            context = hook_payload(task, 9_000)["hookSpecificOutput"]["additionalContext"]
+            self.assertNotIn("keep a stage here", context, task)
+
+    def test_every_mechanical_stage_says_why_it_is_delegated(self):
+        from route import _MECHANICAL_STAGES, _context_note
+
+        for stage in sorted(_MECHANICAL_STAGES):
+            note = _context_note(9_000, [{"stage": stage}])
+            self.assertIn("still goes to `tier-haiku", note, stage)
+            self.assertNotIn("delegated: .", note, stage)
+
+    def test_the_log_stage_claims_every_query_in_the_turn(self):
+        context = hook_payload("check log 4 agent")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Every log query in the turn belongs to this stage", context)
+        self.assertIn("`SendMessage`", context)
+        self.assertIn("never re-run a query you already delegated", context)
 
     def test_an_unmeasured_context_adds_nothing(self):
         payload = hook_payload("bump image agent to f7db740")
@@ -782,6 +802,17 @@ class ReleaseWithoutAHintTests(unittest.TestCase):
         opus = render_text(raw, "opus", "high")
         self.assertIn("Release work is the exception, and it does not wait for a hint", opus)
         self.assertIn("whether or not this conversation has a hint", opus)
+        self.assertNotIn("{{", opus)
+
+
+class LogWithoutAHintTests(unittest.TestCase):
+    def test_the_skill_delegates_every_log_fetch_with_no_hint(self):
+        raw = (Path(__file__).resolve().parent / "skill" / "SKILL.md").read_text(encoding="utf-8")
+        opus = render_text(raw, "opus", "high")
+        self.assertIn("Log work is the other exception", opus)
+        self.assertIn("the follow-up ones included", opus)
+        self.assertIn("`SendMessage`", opus)
+        self.assertIn("never re-run a query you have already delegated", opus)
         self.assertNotIn("{{", opus)
 
 

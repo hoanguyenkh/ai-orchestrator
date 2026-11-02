@@ -6,7 +6,8 @@ effort. `init.sh sonnet` installs Sonnet instead. Implementation, code review,
 and re-review stay on that main session in one shared context. Subagents are
 only spawned for a different role:
   - plan            -> tier-plan (fable, effort high)
-  - log fetch       -> tier-haiku (haiku); main session analyzes and decides
+  - log fetch       -> tier-haiku (haiku), every query in the turn including the
+                       follow-ups; main session analyzes and decides
   - commit/push/PR  -> tier-haiku-release (haiku) as one stage; the main
                        session writes the commit message and the PR body
   - image-tag bump  -> tier-haiku-release (haiku)
@@ -252,11 +253,27 @@ _CONTEXT_FLOOR = 150_000
 # Enough of the transcript tail to hold the last usage record of a long
 # session, where single records run to a few kilobytes.
 _CONTEXT_TAIL_BYTES = 262_144
-# Stages whose whole saving is escaping the accumulated context.
-_MECHANICAL_STAGES = frozenset({"commit", "pr", "bump", "release", "log"})
-# Of those, the ones `tier-haiku-release` takes for its staging rules alone,
-# whatever the context costs.
+# The stages `tier-haiku-release` takes for its staging rules.
 _RELEASE_STAGES = frozenset({"commit", "pr", "bump", "release"})
+# Why each mechanical stage is delegated even when the context is small, in the
+# order the note reads them. A stage counts as mechanical only by appearing
+# here, so the set and the clauses cannot drift apart and leave the note with
+# nothing to say.
+_DELEGATION_REASONS = (
+    (
+        _RELEASE_STAGES,
+        "the release stage still goes to `tier-haiku-release`, whose staging rules are "
+        "the reason for it",
+    ),
+    (
+        frozenset({"log"}),
+        "the log fetch still goes to `tier-haiku`, because returning log lines is "
+        "mechanical work priced at Haiku and never belongs on the main session",
+    ),
+)
+# Stages the context note speaks about. Each one is delegated whatever the
+# context costs.
+_MECHANICAL_STAGES = frozenset().union(*(stages for stages, _ in _DELEGATION_REASONS))
 
 class _Stage:
     """One routing stage. The hint line is the only sentence the hook renders for it."""
@@ -283,6 +300,10 @@ _STAGES = {
         "(datasource, namespace, pod, file), the exact query and its limit, and the window. "
         "Hand it those and the fetch is cheap and parallel; write \"go read the logs\" and "
         "the stage spends its turns guessing and gives up. "
+        "Every log query in the turn belongs to this stage, the follow-up ones included: "
+        "when the lines raise a new question, send that query to the same `tier-haiku` with "
+        "`SendMessage` instead of running it on the main {label} session, and never re-run a "
+        "query you already delegated. "
         "If it cannot reach the logs, it stops and does not guess lines; "
         "analyze them and decide whether to continue on the main {label} session. "
         "Do not leave the conclusion to the subagent. "
@@ -651,17 +672,16 @@ def _context_note(tokens: int | None, stages: list[dict]) -> str:
             "A delegated stage starts clean and stops paying that, so the spawn is worth "
             "it here. "
         )
-    note = (
+    # Non-empty: reaching here means names met at least one _DELEGATION_REASONS family.
+    reasons = [
+        reason for stages, reason in _DELEGATION_REASONS if names.intersection(stages)
+    ]
+    return (
         f"The main session re-reads only about {tokens:,} tokens per request, so a spawn "
-        "saves little context: keep a stage here when delegating would cost more round "
-        "trips than it saves. "
+        "saves little context here. Context is not why these stages are delegated: "
+        + ", and ".join(reasons)
+        + ". "
     )
-    if names.intersection(_RELEASE_STAGES):
-        note += (
-            "The release stage is the exception and still goes to `tier-haiku-release`, "
-            "whose staging rules are the reason for it. "
-        )
-    return note
 
 
 def _hint(task: str, decision: dict, label: str, tokens: int | None = None) -> str:
