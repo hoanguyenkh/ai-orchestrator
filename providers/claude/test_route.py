@@ -315,6 +315,17 @@ class RouteTests(unittest.TestCase):
         self.assertIn("analyze them and decide whether to continue on the main Opus session", text)
         self.assertIn("If that analysis finds no error, stop there.", text)
 
+    def test_log_hint_states_the_access_path_the_caller_owes(self):
+        text = hook_payload("check log của service xxx")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("the delegation carries the access path", text)
+        self.assertIn("the exact query and its limit, and the window", text)
+
+    def test_haiku_agent_can_load_a_deferred_mcp_schema_and_read_a_spill_file(self):
+        text = (Path(__file__).resolve().parent / "agents" / "tier-haiku.md").read_text(encoding="utf-8")
+        self.assertIn("ToolSearch", text)
+        self.assertIn("written to a file whose path the tool returns", text)
+        self.assertIn("the exact query or command you ran", text)
+
     def test_haiku_agent_fetches_logs_without_a_verdict(self):
         text = (Path(__file__).resolve().parent / "agents" / "tier-haiku.md").read_text(encoding="utf-8")
         self.assertIn("Do not label them as an error", text)

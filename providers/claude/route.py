@@ -278,6 +278,11 @@ _STAGES = {
         "tier-haiku",
         "haiku",
         "- log -> `tier-haiku` fetches the log lines and returns those lines only. "
+        "It starts with no project context and no loaded MCP schemas, so the delegation "
+        "carries the access path: the log tool or command by name, the identifier it needs "
+        "(datasource, namespace, pod, file), the exact query and its limit, and the window. "
+        "Hand it those and the fetch is cheap and parallel; write \"go read the logs\" and "
+        "the stage spends its turns guessing and gives up. "
         "If it cannot reach the logs, it stops and does not guess lines; "
         "analyze them and decide whether to continue on the main {label} session. "
         "Do not leave the conclusion to the subagent. "
