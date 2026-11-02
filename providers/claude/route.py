@@ -253,12 +253,27 @@ _CONTEXT_FLOOR = 150_000
 # Enough of the transcript tail to hold the last usage record of a long
 # session, where single records run to a few kilobytes.
 _CONTEXT_TAIL_BYTES = 262_144
-# Stages the context note speaks about. Each one is delegated whatever the
-# context costs: the release stages for their staging rules, the log fetch
-# because returning log lines is mechanical work priced at Haiku.
-_MECHANICAL_STAGES = frozenset({"commit", "pr", "bump", "release", "log"})
-# Of those, the ones `tier-haiku-release` takes for its staging rules.
+# The stages `tier-haiku-release` takes for its staging rules.
 _RELEASE_STAGES = frozenset({"commit", "pr", "bump", "release"})
+# Why each mechanical stage is delegated even when the context is small, in the
+# order the note reads them. A stage counts as mechanical only by appearing
+# here, so the set and the clauses cannot drift apart and leave the note with
+# nothing to say.
+_DELEGATION_REASONS = (
+    (
+        _RELEASE_STAGES,
+        "the release stage still goes to `tier-haiku-release`, whose staging rules are "
+        "the reason for it",
+    ),
+    (
+        frozenset({"log"}),
+        "the log fetch still goes to `tier-haiku`, because returning log lines is "
+        "mechanical work priced at Haiku and never belongs on the main session",
+    ),
+)
+# Stages the context note speaks about. Each one is delegated whatever the
+# context costs.
+_MECHANICAL_STAGES = frozenset().union(*(stages for stages, _ in _DELEGATION_REASONS))
 
 class _Stage:
     """One routing stage. The hint line is the only sentence the hook renders for it."""
@@ -657,17 +672,10 @@ def _context_note(tokens: int | None, stages: list[dict]) -> str:
             "A delegated stage starts clean and stops paying that, so the spawn is worth "
             "it here. "
         )
-    reasons = []
-    if names.intersection(_RELEASE_STAGES):
-        reasons.append(
-            "the release stage still goes to `tier-haiku-release`, whose staging rules are "
-            "the reason for it"
-        )
-    if "log" in names:
-        reasons.append(
-            "the log fetch still goes to `tier-haiku`, because returning log lines is "
-            "mechanical work priced at Haiku and never belongs on the main session"
-        )
+    # Non-empty: reaching here means names met at least one _DELEGATION_REASONS family.
+    reasons = [
+        reason for stages, reason in _DELEGATION_REASONS if names.intersection(stages)
+    ]
     return (
         f"The main session re-reads only about {tokens:,} tokens per request, so a spawn "
         "saves little context here. Context is not why these stages are delegated: "

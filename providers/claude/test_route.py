@@ -773,6 +773,14 @@ class ContextSizeTests(unittest.TestCase):
             context = hook_payload(task, 9_000)["hookSpecificOutput"]["additionalContext"]
             self.assertNotIn("keep a stage here", context, task)
 
+    def test_every_mechanical_stage_says_why_it_is_delegated(self):
+        from route import _MECHANICAL_STAGES, _context_note
+
+        for stage in sorted(_MECHANICAL_STAGES):
+            note = _context_note(9_000, [{"stage": stage}])
+            self.assertIn("still goes to `tier-haiku", note, stage)
+            self.assertNotIn("delegated: .", note, stage)
+
     def test_the_log_stage_claims_every_query_in_the_turn(self):
         context = hook_payload("check log 4 agent")["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Every log query in the turn belongs to this stage", context)
